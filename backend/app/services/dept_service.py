@@ -61,7 +61,19 @@ def check_dept_data_scope(db: Session, login_user: dict, dept_id: int) -> None:
         raise ServiceException("没有权限访问部门数据！")
 
 
+def check_dept_name_unique(db: Session, dept_name: str, parent_id: int, dept_id: int | None = None) -> bool:
+    """对应 checkDeptNameUnique：同一上级下部门名称唯一（排除已删除）"""
+    existing = (
+        db.query(SysDept)
+        .filter(SysDept.dept_name == dept_name, SysDept.parent_id == parent_id, SysDept.del_flag == DEL_FLAG_NORMAL)
+        .first()
+    )
+    return existing is None or existing.dept_id == dept_id
+
+
 def create_dept(db: Session, body, operator_name: str) -> None:
+    if not check_dept_name_unique(db, body.dept_name, body.parent_id):
+        raise ServiceException(f"新增部门'{body.dept_name}'失败，部门名称已存在")
     parent = db.query(SysDept).filter(SysDept.dept_id == body.parent_id).first()
     if parent is None:
         raise ServiceException("父部门不存在")
@@ -84,6 +96,8 @@ def create_dept(db: Session, body, operator_name: str) -> None:
 
 
 def update_dept(db: Session, body, operator_name: str) -> None:
+    if not check_dept_name_unique(db, body.dept_name, body.parent_id, body.dept_id):
+        raise ServiceException(f"修改部门'{body.dept_name}'失败，部门名称已存在")
     if body.parent_id == body.dept_id:
         raise ServiceException(f"修改部门'{body.dept_name}'失败，上级部门不能是自己")
 

@@ -22,6 +22,7 @@ DEL_FLAG_DELETED = "2"
 MENU_TYPE_DIR = "M"
 MENU_TYPE_MENU = "C"
 MENU_TYPE_BUTTON = "F"
+MENU_ROOT_ID = 0  # 菜单根节点的 parent_id
 
 # 菜单是否外链（0是 1否）
 YES_FRAME = 0

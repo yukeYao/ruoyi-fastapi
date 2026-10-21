@@ -3,10 +3,11 @@
 （getRouteName / getRouterPath / getComponent / isMenuFrame / isInnerLink /
 isParentView / innerLinkReplaceEach），对应 getRouters 接口。
 """
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.audit import fill_create_fields, fill_update_fields
-from app.core.constants import MENU_TYPE_DIR, MENU_TYPE_MENU, NO_FRAME, STATUS_NORMAL
+from app.core.constants import MENU_ROOT_ID, MENU_TYPE_DIR, MENU_TYPE_MENU, NO_FRAME, STATUS_NORMAL
 from app.core.exceptions import ServiceException
 from app.core.response import model_to_camel_dict
 from app.core.tree_utils import build_tree_select
@@ -298,11 +299,43 @@ def check_menu_name_unique(db: Session, menu_name: str, parent_id: int, menu_id:
     return existing is None or existing.menu_id == menu_id
 
 
+def check_route_config_unique(db: Session, path: str | None, route_name: str | None, parent_id: int, menu_id: int | None = None) -> bool:
+    """
+    对应 checkRouteConfigUnique（只和目录/菜单比较，忽略大小写）：
+    - 同一上级下路由地址不能重复；
+    - 根目录下的路由地址要和所有目录/菜单都不重复；
+    - 路由名称全局唯一（路由名称为空时用路由地址代替）。
+    """
+    path = path or ""
+    route_name = route_name or path
+    candidates = (
+        db.query(SysMenu)
+        .filter(
+            SysMenu.menu_type.in_((MENU_TYPE_DIR, MENU_TYPE_MENU)),
+            or_(SysMenu.path == path, SysMenu.path == route_name, SysMenu.route_name == path, SysMenu.route_name == route_name),
+        )
+        .all()
+    )
+    for menu in candidates:
+        if menu.menu_id == menu_id:
+            continue
+        db_path = menu.path or ""
+        db_route_name = menu.route_name or db_path
+        same_path = path.lower() == db_path.lower()
+        if same_path and (parent_id == menu.parent_id or parent_id == MENU_ROOT_ID):
+            return False
+        if route_name.lower() == db_route_name.lower():
+            return False
+    return True
+
+
 def create_menu(db: Session, body, operator_name: str) -> None:
     if not check_menu_name_unique(db, body.menu_name, body.parent_id):
         raise ServiceException(f"新增菜单'{body.menu_name}'失败，菜单名称已存在")
     if body.is_frame == 0 and not (body.path or "").startswith(("http://", "https://")):
         raise ServiceException(f"新增菜单'{body.menu_name}'失败，地址必须以http(s)://开头")
+    if not check_route_config_unique(db, body.path, body.route_name, body.parent_id):
+        raise ServiceException(f"新增菜单'{body.menu_name}'失败，路由名称或地址已存在")
 
     menu = SysMenu(
         menu_name=body.menu_name,
@@ -333,6 +366,8 @@ def update_menu(db: Session, body, operator_name: str) -> None:
         raise ServiceException(f"修改菜单'{body.menu_name}'失败，菜单名称已存在")
     if body.is_frame == 0 and not (body.path or "").startswith(("http://", "https://")):
         raise ServiceException(f"修改菜单'{body.menu_name}'失败，地址必须以http(s)://开头")
+    if not check_route_config_unique(db, body.path, body.route_name, body.parent_id, body.menu_id):
+        raise ServiceException(f"修改菜单'{body.menu_name}'失败，路由名称或地址已存在")
 
     menu = db.query(SysMenu).filter(SysMenu.menu_id == body.menu_id).first()
     if menu is None:

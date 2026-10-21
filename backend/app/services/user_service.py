@@ -242,6 +242,11 @@ def update_profile(db: Session, user_id: int, body) -> None:
     user = db.query(SysUser).filter(SysUser.user_id == user_id).first()
     if user is None:
         raise ServiceException("用户不存在")
+    # 对应 SysProfileController.updateProfile 里的手机号/邮箱唯一校验
+    if body.phonenumber and not check_phone_unique(db, body.phonenumber, user_id):
+        raise ServiceException(f"修改用户'{user.user_name}'失败，手机号码已存在")
+    if body.email and not check_email_unique(db, body.email, user_id):
+        raise ServiceException(f"修改用户'{user.user_name}'失败，邮箱账号已存在")
     user.nick_name = body.nick_name
     user.email = body.email
     user.phonenumber = body.phonenumber
