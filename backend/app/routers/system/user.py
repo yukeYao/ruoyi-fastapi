@@ -76,8 +76,9 @@ def update_auth_role(
     return ajax_success()
 
 
+# 对应 @GetMapping(value = { "/", "/{userId}" })：新增用户时前端请求 /system/user/（带末尾斜杠）
 @router.get("/{user_id}")
-@router.get("", include_in_schema=False)
+@router.get("/", include_in_schema=False)
 def get_user_info(
     user_id: int | None = None,
     db: Session = Depends(get_db),

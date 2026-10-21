@@ -21,7 +21,13 @@ from app.routers.system import post as system_post
 from app.routers.system import role as system_role
 from app.routers.system import user as system_user
 
-app = FastAPI(title="RuoYi FastAPI 后端", description="用 FastAPI 复现若依后端（精简学习版）")
+# redirect_slashes=False：路由路径要与前端请求严格一致（含末尾斜杠）。
+# 默认的 307 重定向地址会绕过 vite 代理，被浏览器当作跨域请求拦截，前端报"后端接口连接异常"。
+app = FastAPI(
+    title="RuoYi FastAPI 后端",
+    description="用 FastAPI 复现若依后端（精简学习版）",
+    redirect_slashes=False,
+)
 
 
 class RequestContextMiddleware(BaseHTTPMiddleware):
