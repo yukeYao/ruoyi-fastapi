@@ -30,7 +30,7 @@ def list_roles(
 
 @router.get("/optionselect")
 def optionselect(db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:role:query"))):
-    return ajax_success(data=role_service.list_all_roles(db))
+    return ajax_success(data=role_service.list_all_roles(db, login_user))
 
 
 @router.get("/authUser/allocatedList")

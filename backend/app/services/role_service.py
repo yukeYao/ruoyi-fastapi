@@ -15,9 +15,8 @@ from app.models.sys_user import SysUser
 from app.models.sys_user_role import SysUserRole
 
 
-def list_roles(
-    db: Session, login_user: dict, role_name: str | None, status: str | None, role_key: str | None, page_num: int, page_size: int
-) -> tuple[list[dict], int]:
+def _role_query(db: Session, login_user: dict, role_name: str | None = None, status: str | None = None, role_key: str | None = None):
+    """对应 selectRoleList（带 @DataScope）：返回 (query, 角色别名 r)"""
     r = aliased(SysRole, name="r")
     ur = aliased(SysUserRole, name="ur")
     u = aliased(SysUser, name="u")
@@ -41,18 +40,26 @@ def list_roles(
     scope_expr = build_data_scope_filter(login_user, dept_alias="d", user_alias="u")
     if scope_expr:
         query = query.filter(text(scope_expr))
+    return query, r
 
+
+def list_roles(
+    db: Session, login_user: dict, role_name: str | None, status: str | None, role_key: str | None, page_num: int, page_size: int
+) -> tuple[list[dict], int]:
+    query, r = _role_query(db, login_user, role_name, status, role_key)
     total = query.count()
     rows = query.order_by(r.role_sort).offset((page_num - 1) * page_size).limit(page_size).all()
     return [model_to_camel_dict(role) for role in rows], total
 
 
-def check_role_data_scope(db: Session, login_user: dict, role_id: int) -> None:
+def check_role_data_scope(db: Session, login_user: dict, *role_ids: int) -> None:
+    """对应 checkRoleDataScope(Long... roleIds)"""
     if login_user.get("user_id") == SUPER_ADMIN_ID:
         return
-    rows, _ = list_roles(db, login_user, None, None, None, 1, 1000)
-    if not any(r["roleId"] == role_id for r in rows):
-        raise ServiceException("没有权限访问角色数据！")
+    for role_id in role_ids:
+        query, r = _role_query(db, login_user)
+        if query.filter(r.role_id == role_id).first() is None:
+            raise ServiceException("没有权限访问角色数据！")
 
 
 def check_role_allowed(role_id: int | None) -> None:
@@ -77,10 +84,10 @@ def get_role_detail(db: Session, role_id: int) -> dict:
     return model_to_camel_dict(role)
 
 
-def list_all_roles(db: Session) -> list[dict]:
-    """角色选择框列表（optionselect），不分页，不做数据权限过滤"""
-    roles = db.query(SysRole).filter(SysRole.del_flag == DEL_FLAG_NORMAL).order_by(SysRole.role_sort).all()
-    return [model_to_camel_dict(r) for r in roles]
+def list_all_roles(db: Session, login_user: dict) -> list[dict]:
+    """对应 selectRoleAll：不分页的角色列表，Java 里经 AOP 代理调用 selectRoleList，同样受数据权限过滤"""
+    query, r = _role_query(db, login_user)
+    return [model_to_camel_dict(role) for role in query.order_by(r.role_sort).all()]
 
 
 def create_role(db: Session, body, operator_name: str) -> int:

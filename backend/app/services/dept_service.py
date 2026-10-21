@@ -53,8 +53,8 @@ def get_dept_detail(db: Session, dept_id: int) -> dict:
     return model_to_camel_dict(dept)
 
 
-def check_dept_data_scope(db: Session, login_user: dict, dept_id: int) -> None:
-    if login_user.get("user_id") == SUPER_ADMIN_ID:
+def check_dept_data_scope(db: Session, login_user: dict, dept_id: int | None) -> None:
+    if login_user.get("user_id") == SUPER_ADMIN_ID or dept_id is None:
         return
     rows = list_depts(db, login_user, None, None)
     if not any(d["deptId"] == dept_id for d in rows):

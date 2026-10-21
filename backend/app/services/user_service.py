@@ -12,13 +12,13 @@ from app.core.data_scope import build_data_scope_filter
 from app.core.exceptions import ServiceException
 from app.core.response import model_to_camel_dict
 from app.core.security import hash_password, verify_password
-from app.core.tree_utils import build_tree_select
 from app.models.sys_dept import SysDept
 from app.models.sys_post import SysPost
 from app.models.sys_role import SysRole
 from app.models.sys_user import SysUser
 from app.models.sys_user_post import SysUserPost
 from app.models.sys_user_role import SysUserRole
+from app.services import dept_service, role_service
 
 
 def _row_to_dict(user: SysUser, dept_name: str | None, leader: str | None) -> dict:
@@ -116,16 +116,18 @@ def get_user_detail(db: Session, login_user: dict, user_id: int | None) -> dict:
         result["postIds"] = post_ids
         result["roleIds"] = role_ids
 
-    is_target_admin = user_id == SUPER_ADMIN_ID
-    roles = db.query(SysRole).filter(SysRole.del_flag == DEL_FLAG_NORMAL).order_by(SysRole.role_sort).all()
-    if not is_target_admin:
-        roles = [r for r in roles if r.role_id != SUPER_ADMIN_ID]
-    result["roles"] = [model_to_camel_dict(r) for r in roles]
+    # 角色列表对应 selectRoleAll，受数据权限过滤；只有目标是超级管理员时才包含超级管理员角色
+    roles = role_service.list_all_roles(db, login_user)
+    if user_id != SUPER_ADMIN_ID:
+        roles = [r for r in roles if r["roleId"] != SUPER_ADMIN_ID]
+    result["roles"] = roles
     result["posts"] = [model_to_camel_dict(p) for p in db.query(SysPost).order_by(SysPost.post_sort).all()]
     return result
 
 
-def create_user(db: Session, body, operator_name: str) -> None:
+def create_user(db: Session, login_user: dict, body, operator_name: str) -> None:
+    dept_service.check_dept_data_scope(db, login_user, body.dept_id)
+    role_service.check_role_data_scope(db, login_user, *body.role_ids)
     if not check_user_name_unique(db, body.user_name):
         raise ServiceException(f"新增用户'{body.user_name}'失败，登录账号已存在")
     if body.phonenumber and not check_phone_unique(db, body.phonenumber):
@@ -158,6 +160,8 @@ def create_user(db: Session, body, operator_name: str) -> None:
 def update_user(db: Session, login_user: dict, body, operator_name: str) -> None:
     check_user_allowed(body.user_id)
     check_user_data_scope(db, login_user, body.user_id)
+    dept_service.check_dept_data_scope(db, login_user, body.dept_id)
+    role_service.check_role_data_scope(db, login_user, *body.role_ids)
     if body.phonenumber and not check_phone_unique(db, body.phonenumber, body.user_id):
         raise ServiceException("修改用户失败，手机号码已存在")
     if body.email and not check_email_unique(db, body.email, body.user_id):
@@ -200,8 +204,9 @@ def delete_users(db: Session, login_user: dict, user_ids: list[int], current_use
     db.commit()
 
 
-def reset_pwd(db: Session, user_id: int, new_password: str, operator_name: str) -> None:
+def reset_pwd(db: Session, login_user: dict, user_id: int, new_password: str, operator_name: str) -> None:
     check_user_allowed(user_id)
+    check_user_data_scope(db, login_user, user_id)
     user = db.query(SysUser).filter(SysUser.user_id == user_id).first()
     if user is None:
         raise ServiceException("用户不存在")
@@ -210,8 +215,9 @@ def reset_pwd(db: Session, user_id: int, new_password: str, operator_name: str) 
     db.commit()
 
 
-def change_status(db: Session, user_id: int, status: str, operator_name: str) -> None:
+def change_status(db: Session, login_user: dict, user_id: int, status: str, operator_name: str) -> None:
     check_user_allowed(user_id)
+    check_user_data_scope(db, login_user, user_id)
     user = db.query(SysUser).filter(SysUser.user_id == user_id).first()
     if user is None:
         raise ServiceException("用户不存在")
@@ -268,37 +274,25 @@ def update_password(db: Session, user_id: int, old_password: str, new_password: 
     db.commit()
 
 
-def get_auth_role(db: Session, user_id: int) -> dict:
+def get_auth_role(db: Session, login_user: dict, user_id: int) -> dict:
     user = db.query(SysUser).filter(SysUser.user_id == user_id).first()
     if user is None:
         raise ServiceException("用户不存在")
     assigned_role_ids = {row.role_id for row in db.query(SysUserRole).filter(SysUserRole.user_id == user_id).all()}
 
-    is_target_admin = user_id == SUPER_ADMIN_ID
-    roles = db.query(SysRole).filter(SysRole.del_flag == DEL_FLAG_NORMAL).order_by(SysRole.role_sort).all()
-    if not is_target_admin:
-        roles = [r for r in roles if r.role_id != SUPER_ADMIN_ID]
+    roles = role_service.list_all_roles(db, login_user)
+    if user_id != SUPER_ADMIN_ID:
+        roles = [r for r in roles if r["roleId"] != SUPER_ADMIN_ID]
 
-    role_dicts = []
-    for r in roles:
-        d = model_to_camel_dict(r)
-        d["flag"] = r.role_id in assigned_role_ids
-        role_dicts.append(d)
+    role_dicts = [{**r, "flag": r["roleId"] in assigned_role_ids} for r in roles]
 
     return {"user": model_to_camel_dict(user, exclude={"password"}), "roles": role_dicts}
 
 
-def update_auth_role(db: Session, user_id: int, role_ids: list[int]) -> None:
+def update_auth_role(db: Session, login_user: dict, user_id: int, role_ids: list[int]) -> None:
+    check_user_data_scope(db, login_user, user_id)
+    role_service.check_role_data_scope(db, login_user, *role_ids)
     db.query(SysUserRole).filter(SysUserRole.user_id == user_id).delete()
     for role_id in role_ids:
         db.add(SysUserRole(user_id=user_id, role_id=role_id))
     db.commit()
-
-
-def dept_tree_select(db: Session) -> list[dict]:
-    depts = db.query(SysDept).filter(SysDept.del_flag == DEL_FLAG_NORMAL).order_by(SysDept.parent_id, SysDept.order_num).all()
-    nodes = [
-        {"id": d.dept_id, "parent_id": d.parent_id or 0, "label": d.dept_name, "disabled": d.status == "1"}
-        for d in depts
-    ]
-    return build_tree_select(nodes)

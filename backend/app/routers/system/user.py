@@ -9,7 +9,7 @@ from app.core.oper_log import log
 from app.core.request_utils import get_date_range_params
 from app.core.response import ajax_success, table_data_info
 from app.schemas.user import UserChangeStatus, UserCreate, UserProfileUpdate, UserPwdUpdate, UserResetPwd, UserUpdate
-from app.services import user_service
+from app.services import dept_service, user_service
 
 router = APIRouter(prefix="/system/user")
 
@@ -36,8 +36,9 @@ def update_profile_pwd(
 
 
 @router.get("/deptTree")
-def dept_tree(db: Session = Depends(get_db), login_user: dict = Depends(get_login_user)):
-    return ajax_success(data=user_service.dept_tree_select(db))
+def dept_tree(db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:user:list"))):
+    # 对应 deptService.selectDeptTreeList：部门列表带 @DataScope，按数据权限过滤
+    return ajax_success(data=dept_service.dept_tree_select(db, login_user))
 
 
 @router.get("/list")
@@ -61,7 +62,7 @@ def list_users(
 
 @router.get("/authRole/{user_id}")
 def auth_role(user_id: int, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:user:query"))):
-    return ajax_success(**user_service.get_auth_role(db, user_id))
+    return ajax_success(**user_service.get_auth_role(db, login_user, user_id))
 
 
 @router.put("/authRole")
@@ -72,7 +73,7 @@ def update_auth_role(
     login_user: dict = Depends(has_perm("system:user:edit")),
 ):
     role_ids = [int(x) for x in roleIds.split(",") if x]
-    user_service.update_auth_role(db, userId, role_ids)
+    user_service.update_auth_role(db, login_user, userId, role_ids)
     return ajax_success()
 
 
@@ -90,7 +91,7 @@ def get_user_info(
 @router.post("")
 @log(title="用户管理", business_type=BIZ_INSERT)
 def add_user(body: UserCreate, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:user:add"))):
-    user_service.create_user(db, body, login_user["user_name"])
+    user_service.create_user(db, login_user, body, login_user["user_name"])
     return ajax_success()
 
 
@@ -106,7 +107,7 @@ def edit_user(body: UserUpdate, db: Session = Depends(get_db), login_user: dict 
 def reset_pwd(
     body: UserResetPwd, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:user:resetPwd"))
 ):
-    user_service.reset_pwd(db, body.user_id, body.password, login_user["user_name"])
+    user_service.reset_pwd(db, login_user, body.user_id, body.password, login_user["user_name"])
     return ajax_success()
 
 
@@ -115,7 +116,7 @@ def reset_pwd(
 def change_status(
     body: UserChangeStatus, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:user:edit"))
 ):
-    user_service.change_status(db, body.user_id, body.status, login_user["user_name"])
+    user_service.change_status(db, login_user, body.user_id, body.status, login_user["user_name"])
     return ajax_success()
 
 
