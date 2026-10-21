@@ -6,10 +6,12 @@ from fastapi import FastAPI
 
 from app.config import settings
 from app.core.exceptions import register_exception_handlers
+from app.routers import auth
 
 app = FastAPI(title="RuoYi FastAPI 后端", description="用 FastAPI 复现若依后端（精简学习版）")
 
 register_exception_handlers(app)
+app.include_router(auth.router)
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=settings.app_port, reload=True)

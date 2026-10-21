@@ -26,3 +26,27 @@ MENU_TYPE_BUTTON = "F"
 # 菜单是否外链（0是 1否）
 YES_FRAME = 0
 NO_FRAME = 1
+
+# ---------- 登录认证相关（对应若依 CacheConstants / Constants）----------
+
+# Redis key 前缀
+LOGIN_TOKEN_KEY_PREFIX = "login_tokens:"
+CAPTCHA_CODE_KEY_PREFIX = "captcha_codes:"
+PWD_ERR_CNT_KEY_PREFIX = "pwd_err_cnt:"
+
+# 验证码有效期（分钟）
+CAPTCHA_EXPIRE_MINUTES = 2
+
+# 登录态在 Redis 的有效期（分钟），对应 token.expireTime
+LOGIN_TOKEN_EXPIRE_MINUTES = 30
+# 剩余有效期不足该分钟数时自动续期
+TOKEN_REFRESH_THRESHOLD_MINUTES = 20
+
+# 密码错误锁定：最大重试次数 / 锁定时间（分钟）
+PASSWORD_MAX_RETRY_COUNT = 5
+PASSWORD_LOCK_MINUTES = 10
+
+# Authorization 头的 token 前缀
+TOKEN_PREFIX = "Bearer "
+# JWT claims 里存 token uuid 的字段名
+LOGIN_USER_KEY = "login_user_key"
