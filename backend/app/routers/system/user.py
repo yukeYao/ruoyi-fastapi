@@ -2,8 +2,10 @@
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
+from app.core.constants import BIZ_DELETE, BIZ_INSERT, BIZ_UPDATE
 from app.core.database import get_db
 from app.core.deps import get_login_user, has_perm
+from app.core.oper_log import log
 from app.core.request_utils import get_date_range_params
 from app.core.response import ajax_success, table_data_info
 from app.schemas.user import UserChangeStatus, UserCreate, UserProfileUpdate, UserPwdUpdate, UserResetPwd, UserUpdate
@@ -85,18 +87,21 @@ def get_user_info(
 
 
 @router.post("")
+@log(title="用户管理", business_type=BIZ_INSERT)
 def add_user(body: UserCreate, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:user:add"))):
     user_service.create_user(db, body, login_user["user_name"])
     return ajax_success()
 
 
 @router.put("")
+@log(title="用户管理", business_type=BIZ_UPDATE)
 def edit_user(body: UserUpdate, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:user:edit"))):
     user_service.update_user(db, login_user, body, login_user["user_name"])
     return ajax_success()
 
 
 @router.put("/resetPwd")
+@log(title="用户管理", business_type=BIZ_UPDATE)
 def reset_pwd(
     body: UserResetPwd, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:user:resetPwd"))
 ):
@@ -105,6 +110,7 @@ def reset_pwd(
 
 
 @router.put("/changeStatus")
+@log(title="用户管理", business_type=BIZ_UPDATE)
 def change_status(
     body: UserChangeStatus, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:user:edit"))
 ):
@@ -113,6 +119,7 @@ def change_status(
 
 
 @router.delete("/{user_ids}")
+@log(title="用户管理", business_type=BIZ_DELETE)
 def remove_users(
     user_ids: str, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:user:remove"))
 ):

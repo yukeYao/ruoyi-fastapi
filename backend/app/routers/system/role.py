@@ -2,8 +2,10 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.core.constants import BIZ_DELETE, BIZ_GRANT, BIZ_INSERT, BIZ_UPDATE
 from app.core.database import get_db
 from app.core.deps import has_perm
+from app.core.oper_log import log
 from app.core.response import ajax_success, table_data_info
 from app.schemas.auth_user import AuthUserCancelBody
 from app.schemas.role import RoleChangeStatus, RoleCreate, RoleDataScope, RoleUpdate
@@ -60,6 +62,7 @@ def unallocated_user_list(
 
 
 @router.put("/authUser/cancel")
+@log(title="角色管理", business_type=BIZ_GRANT)
 def cancel_auth_user(
     body: AuthUserCancelBody, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:role:edit"))
 ):
@@ -68,6 +71,7 @@ def cancel_auth_user(
 
 
 @router.put("/authUser/cancelAll")
+@log(title="角色管理", business_type=BIZ_GRANT)
 def cancel_auth_user_all(
     roleId: int = Query(...),
     userIds: list[int] = Query(default=[]),
@@ -79,6 +83,7 @@ def cancel_auth_user_all(
 
 
 @router.put("/authUser/selectAll")
+@log(title="角色管理", business_type=BIZ_GRANT)
 def select_auth_user_all(
     roleId: int = Query(...),
     userIds: list[int] = Query(default=[]),
@@ -104,18 +109,21 @@ def get_role(role_id: int, db: Session = Depends(get_db), login_user: dict = Dep
 
 
 @router.post("")
+@log(title="角色管理", business_type=BIZ_INSERT)
 def add_role(body: RoleCreate, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:role:add"))):
     role_service.create_role(db, body, login_user["user_name"])
     return ajax_success()
 
 
 @router.put("")
+@log(title="角色管理", business_type=BIZ_UPDATE)
 def edit_role(body: RoleUpdate, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:role:edit"))):
     role_service.update_role(db, login_user, body, login_user["user_name"])
     return ajax_success()
 
 
 @router.put("/dataScope")
+@log(title="角色管理", business_type=BIZ_UPDATE)
 def data_scope(
     body: RoleDataScope, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:role:edit"))
 ):
@@ -124,6 +132,7 @@ def data_scope(
 
 
 @router.put("/changeStatus")
+@log(title="角色管理", business_type=BIZ_UPDATE)
 def change_status(
     body: RoleChangeStatus, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:role:edit"))
 ):
@@ -132,6 +141,7 @@ def change_status(
 
 
 @router.delete("/{role_ids}")
+@log(title="角色管理", business_type=BIZ_DELETE)
 def remove_roles(
     role_ids: str, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:role:remove"))
 ):

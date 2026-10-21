@@ -50,3 +50,19 @@ PASSWORD_LOCK_MINUTES = 10
 TOKEN_PREFIX = "Bearer "
 # JWT claims 里存 token uuid 的字段名
 LOGIN_USER_KEY = "login_user_key"
+
+# ---------- 操作日志业务类型（对应若依 BusinessType 枚举的 ordinal）----------
+BIZ_OTHER = 0
+BIZ_INSERT = 1
+BIZ_UPDATE = 2
+BIZ_DELETE = 3
+BIZ_GRANT = 4
+BIZ_EXPORT = 5
+BIZ_IMPORT = 6
+BIZ_FORCE = 7
+BIZ_GENCODE = 8
+BIZ_CLEAN = 9
+
+# 操作日志状态：0正常 1异常
+OPER_STATUS_SUCCESS = 0
+OPER_STATUS_FAIL = 1

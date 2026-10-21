@@ -2,9 +2,10 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
-from app.core.constants import SUPER_ADMIN_ID
+from app.core.constants import BIZ_DELETE, BIZ_INSERT, BIZ_UPDATE, SUPER_ADMIN_ID
 from app.core.database import get_db
 from app.core.deps import has_perm
+from app.core.oper_log import log
 from app.core.response import ajax_success
 from app.schemas.menu import MenuCreate, MenuUpdate
 from app.services import menu_service, role_service
@@ -49,12 +50,14 @@ def get_menu(menu_id: int, db: Session = Depends(get_db), login_user: dict = Dep
 
 
 @router.post("")
+@log(title="菜单管理", business_type=BIZ_INSERT)
 def add_menu(body: MenuCreate, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:menu:add"))):
     menu_service.create_menu(db, body, login_user["user_name"])
     return ajax_success()
 
 
 @router.put("")
+@log(title="菜单管理", business_type=BIZ_UPDATE)
 def edit_menu(
     body: MenuUpdate, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:menu:edit"))
 ):
@@ -63,6 +66,7 @@ def edit_menu(
 
 
 @router.delete("/{menu_id}")
+@log(title="菜单管理", business_type=BIZ_DELETE)
 def remove_menu(
     menu_id: int, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:menu:remove"))
 ):

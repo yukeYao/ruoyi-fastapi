@@ -36,7 +36,7 @@ def login(body: LoginBody, request: Request, db: Session = Depends(get_db)):
     user = login_service.authenticate(db, body.username, body.password, ip, browser, os_name)
     login_service.record_login_success(db, user, ip, browser, os_name)
 
-    login_user = login_service.build_login_user(db, user)
+    login_user = login_service.build_login_user(db, user, ip, browser, os_name)
     token = create_token(login_user)
     return ajax_success(token=token)
 

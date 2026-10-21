@@ -101,9 +101,10 @@ def authenticate(db: Session, username: str, password: str, ip: str, browser: st
     return user
 
 
-def build_login_user(db: Session, user: SysUser) -> dict:
+def build_login_user(db: Session, user: SysUser, ip: str = "", browser: str = "", os_name: str = "") -> dict:
     """
     组装存入 Redis 的登录态字典，对应 Java 的 LoginUser（只保留本项目用得到的字段）。
+    ip/browser/os_name 在线用户监控页要用；dept_name 操作日志和在线用户列表都要用。
     """
     is_admin = user.user_id == SUPER_ADMIN_ID
     if is_admin:
@@ -134,15 +135,25 @@ def build_login_user(db: Session, user: SysUser) -> dict:
                         perm_set.update(p for p in perm.split(",") if p)
         permissions = list(perm_set)
 
+    dept_name = ""
+    if user.dept_id:
+        dept = db.query(SysDept).filter(SysDept.dept_id == user.dept_id).first()
+        if dept:
+            dept_name = dept.dept_name
+
     return {
         "user_id": user.user_id,
         "dept_id": user.dept_id,
+        "dept_name": dept_name,
         "user_name": user.user_name,
         "nick_name": user.nick_name,
         "is_admin": is_admin,
         "role_keys": role_keys,
         "roles": roles_meta,
         "permissions": permissions,
+        "ip": ip,
+        "browser": browser,
+        "os": os_name,
     }
 
 

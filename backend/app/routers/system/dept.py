@@ -2,8 +2,10 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
+from app.core.constants import BIZ_DELETE, BIZ_INSERT, BIZ_UPDATE
 from app.core.database import get_db
 from app.core.deps import has_perm
+from app.core.oper_log import log
 from app.core.response import ajax_success
 from app.schemas.dept import DeptCreate, DeptUpdate
 from app.services import dept_service
@@ -35,12 +37,14 @@ def get_dept(dept_id: int, db: Session = Depends(get_db), login_user: dict = Dep
 
 
 @router.post("")
+@log(title="部门管理", business_type=BIZ_INSERT)
 def add_dept(body: DeptCreate, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:dept:add"))):
     dept_service.create_dept(db, body, login_user["user_name"])
     return ajax_success()
 
 
 @router.put("")
+@log(title="部门管理", business_type=BIZ_UPDATE)
 def edit_dept(
     body: DeptUpdate, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:dept:edit"))
 ):
@@ -50,6 +54,7 @@ def edit_dept(
 
 
 @router.delete("/{dept_id}")
+@log(title="部门管理", business_type=BIZ_DELETE)
 def remove_dept(
     dept_id: int, db: Session = Depends(get_db), login_user: dict = Depends(has_perm("system:dept:remove"))
 ):
