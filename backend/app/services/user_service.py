@@ -6,6 +6,7 @@
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session, aliased
 
+from app.core.audit import fill_create_fields, fill_update_fields
 from app.core.constants import DEL_FLAG_DELETED, DEL_FLAG_NORMAL, SUPER_ADMIN_ID
 from app.core.data_scope import build_data_scope_filter
 from app.core.exceptions import ServiceException
@@ -142,8 +143,8 @@ def create_user(db: Session, body, operator_name: str) -> None:
         password=hash_password(body.password),
         status=body.status or "0",
         remark=body.remark,
-        create_by=operator_name,
     )
+    fill_create_fields(user, operator_name)
     db.add(user)
     db.flush()  # 拿到 user_id
 
@@ -173,7 +174,7 @@ def update_user(db: Session, login_user: dict, body, operator_name: str) -> None
     user.sex = body.sex
     user.status = body.status
     user.remark = body.remark
-    user.update_by = operator_name
+    fill_update_fields(user, operator_name)
 
     db.query(SysUserRole).filter(SysUserRole.user_id == body.user_id).delete()
     for role_id in body.role_ids:
@@ -205,7 +206,7 @@ def reset_pwd(db: Session, user_id: int, new_password: str, operator_name: str) 
     if user is None:
         raise ServiceException("用户不存在")
     user.password = hash_password(new_password)
-    user.update_by = operator_name
+    fill_update_fields(user, operator_name)
     db.commit()
 
 
@@ -215,7 +216,7 @@ def change_status(db: Session, user_id: int, status: str, operator_name: str) ->
     if user is None:
         raise ServiceException("用户不存在")
     user.status = status
-    user.update_by = operator_name
+    fill_update_fields(user, operator_name)
     db.commit()
 
 
@@ -245,6 +246,7 @@ def update_profile(db: Session, user_id: int, body) -> None:
     user.email = body.email
     user.phonenumber = body.phonenumber
     user.sex = body.sex
+    fill_update_fields(user, user.user_name)  # 个人中心：操作人就是自己
     db.commit()
 
 
@@ -257,6 +259,7 @@ def update_password(db: Session, user_id: int, old_password: str, new_password: 
     if verify_password(new_password, user.password):
         raise ServiceException("新密码不能与旧密码相同")
     user.password = hash_password(new_password)
+    fill_update_fields(user, user.user_name)
     db.commit()
 
 

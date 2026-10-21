@@ -2,6 +2,7 @@
 from sqlalchemy import text
 from sqlalchemy.orm import Session, aliased
 
+from app.core.audit import fill_create_fields, fill_update_fields
 from app.core.constants import DEL_FLAG_DELETED, DEL_FLAG_NORMAL, SUPER_ADMIN_ID, SUPER_ADMIN_ROLE_ID
 from app.core.data_scope import build_data_scope_filter
 from app.core.exceptions import ServiceException
@@ -96,8 +97,8 @@ def create_role(db: Session, body, operator_name: str) -> int:
         menu_check_strictly=1 if body.menu_check_strictly else 0,
         dept_check_strictly=1 if body.dept_check_strictly else 0,
         remark=body.remark,
-        create_by=operator_name,
     )
+    fill_create_fields(role, operator_name)
     db.add(role)
     db.flush()
     for menu_id in body.menu_ids:
@@ -124,7 +125,7 @@ def update_role(db: Session, login_user: dict, body, operator_name: str) -> None
     role.menu_check_strictly = 1 if body.menu_check_strictly else 0
     role.dept_check_strictly = 1 if body.dept_check_strictly else 0
     role.remark = body.remark
-    role.update_by = operator_name
+    fill_update_fields(role, operator_name)
 
     db.query(SysRoleMenu).filter(SysRoleMenu.role_id == body.role_id).delete()
     for menu_id in body.menu_ids:
@@ -140,7 +141,7 @@ def update_data_scope(db: Session, login_user: dict, body, operator_name: str) -
         raise ServiceException("角色不存在")
     role.data_scope = body.data_scope
     role.dept_check_strictly = 1 if body.dept_check_strictly else 0
-    role.update_by = operator_name
+    fill_update_fields(role, operator_name)
 
     db.query(SysRoleDept).filter(SysRoleDept.role_id == body.role_id).delete()
     if body.data_scope == "2":
@@ -156,7 +157,7 @@ def change_status(db: Session, login_user: dict, role_id: int, status: str, oper
     if role is None:
         raise ServiceException("角色不存在")
     role.status = status
-    role.update_by = operator_name
+    fill_update_fields(role, operator_name)
     db.commit()
 
 

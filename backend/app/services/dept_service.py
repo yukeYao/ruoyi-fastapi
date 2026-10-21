@@ -12,6 +12,7 @@
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app.core.audit import fill_create_fields, fill_update_fields
 from app.core.constants import DEL_FLAG_DELETED, DEL_FLAG_NORMAL, STATUS_DISABLE, STATUS_NORMAL, SUPER_ADMIN_ID
 from app.core.data_scope import build_data_scope_filter
 from app.core.exceptions import ServiceException
@@ -76,8 +77,8 @@ def create_dept(db: Session, body, operator_name: str) -> None:
         phone=body.phone,
         email=body.email,
         status=body.status,
-        create_by=operator_name,
     )
+    fill_create_fields(dept, operator_name)
     db.add(dept)
     db.commit()
 
@@ -120,7 +121,7 @@ def update_dept(db: Session, body, operator_name: str) -> None:
     dept.phone = body.phone
     dept.email = body.email
     dept.status = body.status
-    dept.update_by = operator_name
+    fill_update_fields(dept, operator_name)
     db.commit()
 
     # 启用部门时，顺带把它所有祖先都改成正常状态（上级都不正常，自己正常没有意义）

@@ -5,6 +5,7 @@ isParentView / innerLinkReplaceEach），对应 getRouters 接口。
 """
 from sqlalchemy.orm import Session
 
+from app.core.audit import fill_create_fields, fill_update_fields
 from app.core.constants import MENU_TYPE_DIR, MENU_TYPE_MENU, NO_FRAME, STATUS_NORMAL
 from app.core.exceptions import ServiceException
 from app.core.response import model_to_camel_dict
@@ -319,8 +320,8 @@ def create_menu(db: Session, body, operator_name: str) -> None:
         perms=body.perms,
         icon=body.icon,
         remark=body.remark,
-        create_by=operator_name,
     )
+    fill_create_fields(menu, operator_name)
     db.add(menu)
     db.commit()
 
@@ -351,7 +352,7 @@ def update_menu(db: Session, body, operator_name: str) -> None:
     menu.perms = body.perms
     menu.icon = body.icon
     menu.remark = body.remark
-    menu.update_by = operator_name
+    fill_update_fields(menu, operator_name)
     db.commit()
 
 

@@ -1,6 +1,7 @@
 """岗位管理业务逻辑，对应若依 SysPostController + SysPostServiceImpl（sys_post 没有 del_flag，是真删除）"""
 from sqlalchemy.orm import Session
 
+from app.core.audit import fill_create_fields, fill_update_fields
 from app.core.exceptions import ServiceException
 from app.core.response import model_to_camel_dict
 from app.models.sys_post import SysPost
@@ -55,8 +56,8 @@ def create_post(db: Session, body, operator_name: str) -> None:
         post_sort=body.post_sort,
         status=body.status,
         remark=body.remark,
-        create_by=operator_name,
     )
+    fill_create_fields(post, operator_name)
     db.add(post)
     db.commit()
 
@@ -75,7 +76,7 @@ def update_post(db: Session, body, operator_name: str) -> None:
     post.post_sort = body.post_sort
     post.status = body.status
     post.remark = body.remark
-    post.update_by = operator_name
+    fill_update_fields(post, operator_name)
     db.commit()
 
 
