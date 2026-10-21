@@ -67,3 +67,6 @@ BIZ_CLEAN = 9
 # 操作日志状态：0正常 1异常
 OPER_STATUS_SUCCESS = 0
 OPER_STATUS_FAIL = 1
+
+# has_perm 写入登录态副本的"当前接口权限字符"，对应 PermissionContextHolder
+PERMISSION_CONTEXT_KEY = "permission_context"

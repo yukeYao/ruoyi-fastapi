@@ -121,10 +121,13 @@ def build_login_user(db: Session, user: SysUser, ip: str = "", browser: str = ""
             .all()
         )
         role_keys = [r.role_key for r in roles]
-        roles_meta = [{"role_id": r.role_id, "data_scope": r.data_scope} for r in roles]
+        roles_meta = []
 
         perm_set: set[str] = set()
         for role in roles:
+            # 多角色时每个角色记下自己的权限，数据权限过滤要按"当前接口的权限字符"挑选角色；
+            # 停用角色不加载权限（Java 里 permissions 为 null）
+            role_perms: set[str] = set()
             if role.status == STATUS_NORMAL and role.role_id != SUPER_ADMIN_ROLE_ID:
                 rows = (
                     db.query(SysMenu.perms)
@@ -134,7 +137,11 @@ def build_login_user(db: Session, user: SysUser, ip: str = "", browser: str = ""
                 )
                 for (perm,) in rows:
                     if perm:
-                        perm_set.update(p for p in perm.split(",") if p)
+                        role_perms.update(p for p in perm.split(",") if p)
+            perm_set |= role_perms
+            roles_meta.append(
+                {"role_id": role.role_id, "data_scope": role.data_scope, "status": role.status, "permissions": sorted(role_perms)}
+            )
         permissions = list(perm_set)
 
     dept_name = ""

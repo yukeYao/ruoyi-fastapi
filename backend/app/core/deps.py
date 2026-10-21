@@ -6,7 +6,7 @@
 from fastapi import Depends, Header
 
 from app.core import token_service
-from app.core.constants import ALL_PERMISSION, LOGIN_USER_KEY, SUPER_ADMIN_ID, TOKEN_PREFIX
+from app.core.constants import ALL_PERMISSION, LOGIN_USER_KEY, PERMISSION_CONTEXT_KEY, SUPER_ADMIN_ID, TOKEN_PREFIX
 from app.core.exceptions import ServiceException
 from app.core.security import decode_jwt_token
 
@@ -40,9 +40,14 @@ def has_perm(perm: str):
     """
     权限依赖工厂：用法 `Depends(has_perm("system:user:list"))`。
     超级管理员（userId=1）权限是 *:*:*，拥有一切权限。
+
+    返回的登录态是一份副本，带上当前接口的权限字符（PERMISSION_CONTEXT_KEY），对应若依
+    hasPermi 里的 PermissionContextHolder.setContext(permission)，供数据权限过滤挑选角色。
+    不用 ContextVar：同步依赖在线程池里执行，里面设置的 ContextVar 传不到路由函数。
     """
 
     def _check(login_user: dict = Depends(get_login_user)) -> dict:
+        login_user = {**login_user, PERMISSION_CONTEXT_KEY: perm}
         if login_user.get("user_id") == SUPER_ADMIN_ID:
             return login_user
         permissions = set(login_user.get("permissions", []))
