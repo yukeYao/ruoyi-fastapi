@@ -15,6 +15,7 @@ from app.core.constants import (
     ALL_PERMISSION,
     CAPTCHA_CODE_KEY_PREFIX,
     DEL_FLAG_DELETED,
+    DEL_FLAG_NORMAL,
     PASSWORD_LOCK_MINUTES,
     PASSWORD_MAX_RETRY_COUNT,
     PWD_ERR_CNT_KEY_PREFIX,
@@ -73,7 +74,8 @@ def login_pre_check(db: Session, username: str, password: str, ip: str, browser:
 
 
 def authenticate(db: Session, username: str, password: str, ip: str, browser: str, os_name: str) -> SysUser:
-    user = db.query(SysUser).filter(SysUser.user_name == username).first()
+    # 对应 selectUserByUserName：排除已删除用户，否则删除后重建的同名用户会查到旧记录而无法登录
+    user = db.query(SysUser).filter(SysUser.user_name == username, SysUser.del_flag == DEL_FLAG_NORMAL).first()
     if user is None:
         _log(db, username, LOGIN_FAIL, "用户不存在/密码错误", ip, browser, os_name)
         raise ServiceException("用户不存在/密码错误")
@@ -115,7 +117,7 @@ def build_login_user(db: Session, user: SysUser, ip: str = "", browser: str = ""
         roles = (
             db.query(SysRole)
             .join(SysUserRole, SysUserRole.role_id == SysRole.role_id)
-            .filter(SysUserRole.user_id == user.user_id)
+            .filter(SysUserRole.user_id == user.user_id, SysRole.del_flag == DEL_FLAG_NORMAL)
             .all()
         )
         role_keys = [r.role_key for r in roles]

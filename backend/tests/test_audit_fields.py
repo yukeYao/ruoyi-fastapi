@@ -108,7 +108,6 @@ def test_other_modify_endpoints_fill_update_fields(created, path, body):
 
 def test_profile_update_fills_update_fields_with_self():
     """个人中心修改资料/密码：操作人是当前登录用户自己"""
-    # 单独用一个用户名：前面的用例会软删除 audit_user，而登录查用户时没有排除已删除的同名记录
     admin = _admin_headers()
     module = MODULES["user"]
     body = {**module["create"], "userName": "audit_profile"}

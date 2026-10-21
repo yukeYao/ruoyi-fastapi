@@ -90,7 +90,7 @@ def update_dept(db: Session, body, operator_name: str) -> None:
     if body.status == STATUS_DISABLE:
         normal_children = (
             db.query(SysDept)
-            .filter(SysDept.status == STATUS_NORMAL, text(f"FIND_IN_SET({int(body.dept_id)}, ancestors)"))
+            .filter(SysDept.status == STATUS_NORMAL, SysDept.del_flag == DEL_FLAG_NORMAL, text(f"FIND_IN_SET({int(body.dept_id)}, ancestors)"))
             .count()
         )
         if normal_children > 0:

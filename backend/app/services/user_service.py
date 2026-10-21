@@ -233,7 +233,7 @@ def get_profile(db: Session, user_id: int) -> dict:
     ]
     role_names = [
         r.role_name
-        for r in db.query(SysRole).join(SysUserRole, SysUserRole.role_id == SysRole.role_id).filter(SysUserRole.user_id == user_id).all()
+        for r in db.query(SysRole).join(SysUserRole, SysUserRole.role_id == SysRole.role_id).filter(SysUserRole.user_id == user_id, SysRole.del_flag == DEL_FLAG_NORMAL).all()
     ]
     return {"data": data, "postGroup": ",".join(post_names), "roleGroup": ",".join(role_names)}
 
