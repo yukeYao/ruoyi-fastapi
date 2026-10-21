@@ -6,6 +6,9 @@ isParentView / innerLinkReplaceEach），对应 getRouters 接口。
 from sqlalchemy.orm import Session
 
 from app.core.constants import MENU_TYPE_DIR, MENU_TYPE_MENU, NO_FRAME, STATUS_NORMAL
+from app.core.exceptions import ServiceException
+from app.core.response import model_to_camel_dict
+from app.core.tree_utils import build_tree_select
 from app.models.sys_menu import SysMenu
 from app.models.sys_role import SysRole
 from app.models.sys_role_menu import SysRoleMenu
@@ -210,3 +213,152 @@ def build_menus(menus: list[dict]) -> list[dict]:
             router.pop("children", None)
         routers.append(router)
     return routers
+
+
+# ---------------------------------------------------------------------------
+# 菜单管理（增删改查 + 树结构），对应 SysMenuController
+# ---------------------------------------------------------------------------
+
+
+def list_menus(db: Session, is_admin: bool, user_id: int, menu_name: str | None, status: str | None) -> list[dict]:
+    """菜单管理页面的列表，不限制 menu_type（按钮也要显示），不分页"""
+    if is_admin:
+        query = db.query(SysMenu)
+    else:
+        query = (
+            db.query(SysMenu)
+            .join(SysRoleMenu, SysRoleMenu.menu_id == SysMenu.menu_id)
+            .join(SysUserRole, SysUserRole.role_id == SysRoleMenu.role_id)
+            .filter(SysUserRole.user_id == user_id)
+            .distinct()
+        )
+    if menu_name:
+        query = query.filter(SysMenu.menu_name.like(f"%{menu_name}%"))
+    if status:
+        query = query.filter(SysMenu.status == status)
+    menus = query.order_by(SysMenu.parent_id, SysMenu.order_num).all()
+    return [model_to_camel_dict(m) for m in menus]
+
+
+def get_menu_detail(db: Session, menu_id: int) -> dict:
+    menu = db.query(SysMenu).filter(SysMenu.menu_id == menu_id).first()
+    if menu is None:
+        raise ServiceException("菜单不存在")
+    return model_to_camel_dict(menu)
+
+
+def _build_menu_tree_select(menus: list[SysMenu]) -> list[dict]:
+    nodes = [
+        {"id": m.menu_id, "parent_id": m.parent_id or 0, "label": m.menu_name, "disabled": False}
+        for m in menus
+    ]
+    return build_tree_select(nodes)
+
+
+def menu_treeselect(db: Session, is_admin: bool, user_id: int) -> list[dict]:
+    """新增/编辑菜单时选择"上级菜单"用的下拉树，和 list_menus 一样不限制 menu_type"""
+    if is_admin:
+        menus = db.query(SysMenu).order_by(SysMenu.parent_id, SysMenu.order_num).all()
+    else:
+        menus = (
+            db.query(SysMenu)
+            .join(SysRoleMenu, SysRoleMenu.menu_id == SysMenu.menu_id)
+            .join(SysUserRole, SysUserRole.role_id == SysRoleMenu.role_id)
+            .filter(SysUserRole.user_id == user_id)
+            .order_by(SysMenu.parent_id, SysMenu.order_num)
+            .distinct()
+            .all()
+        )
+    return _build_menu_tree_select(menus)
+
+
+def menu_list_by_role_id(db: Session, role_id: int, menu_check_strictly: bool) -> list[int]:
+    """角色"菜单权限"弹窗用：该角色已勾选的菜单 id 列表（严格模式下只给叶子节点）"""
+    checked_ids = {
+        row.menu_id for row in db.query(SysRoleMenu).filter(SysRoleMenu.role_id == role_id).all()
+    }
+    if not menu_check_strictly or not checked_ids:
+        return list(checked_ids)
+
+    all_menus = {m.menu_id: m for m in db.query(SysMenu).all()}
+    parent_ids_of_checked = {all_menus[i].parent_id for i in checked_ids if i in all_menus}
+    return [i for i in checked_ids if i not in parent_ids_of_checked]
+
+
+def role_menu_treeselect(db: Session, is_admin: bool, user_id: int, role_id: int, menu_check_strictly: bool) -> dict:
+    return {
+        "checkedKeys": menu_list_by_role_id(db, role_id, menu_check_strictly),
+        "menus": menu_treeselect(db, is_admin, user_id),
+    }
+
+
+def check_menu_name_unique(db: Session, menu_name: str, parent_id: int, menu_id: int | None = None) -> bool:
+    existing = db.query(SysMenu).filter(SysMenu.menu_name == menu_name, SysMenu.parent_id == parent_id).first()
+    return existing is None or existing.menu_id == menu_id
+
+
+def create_menu(db: Session, body, operator_name: str) -> None:
+    if not check_menu_name_unique(db, body.menu_name, body.parent_id):
+        raise ServiceException(f"新增菜单'{body.menu_name}'失败，菜单名称已存在")
+    if body.is_frame == 0 and not (body.path or "").startswith(("http://", "https://")):
+        raise ServiceException(f"新增菜单'{body.menu_name}'失败，地址必须以http(s)://开头")
+
+    menu = SysMenu(
+        menu_name=body.menu_name,
+        parent_id=body.parent_id,
+        order_num=body.order_num,
+        path=body.path,
+        component=body.component,
+        query=body.query,
+        route_name=body.route_name,
+        is_frame=body.is_frame,
+        is_cache=body.is_cache,
+        menu_type=body.menu_type,
+        visible=body.visible,
+        status=body.status,
+        perms=body.perms,
+        icon=body.icon,
+        remark=body.remark,
+        create_by=operator_name,
+    )
+    db.add(menu)
+    db.commit()
+
+
+def update_menu(db: Session, body, operator_name: str) -> None:
+    if body.menu_id == body.parent_id:
+        raise ServiceException(f"修改菜单'{body.menu_name}'失败，上级菜单不能选择自己")
+    if not check_menu_name_unique(db, body.menu_name, body.parent_id, body.menu_id):
+        raise ServiceException(f"修改菜单'{body.menu_name}'失败，菜单名称已存在")
+    if body.is_frame == 0 and not (body.path or "").startswith(("http://", "https://")):
+        raise ServiceException(f"修改菜单'{body.menu_name}'失败，地址必须以http(s)://开头")
+
+    menu = db.query(SysMenu).filter(SysMenu.menu_id == body.menu_id).first()
+    if menu is None:
+        raise ServiceException("菜单不存在")
+    menu.menu_name = body.menu_name
+    menu.parent_id = body.parent_id
+    menu.order_num = body.order_num
+    menu.path = body.path
+    menu.component = body.component
+    menu.query = body.query
+    menu.route_name = body.route_name
+    menu.is_frame = body.is_frame
+    menu.is_cache = body.is_cache
+    menu.menu_type = body.menu_type
+    menu.visible = body.visible
+    menu.status = body.status
+    menu.perms = body.perms
+    menu.icon = body.icon
+    menu.remark = body.remark
+    menu.update_by = operator_name
+    db.commit()
+
+
+def delete_menu(db: Session, menu_id: int) -> None:
+    if db.query(SysMenu).filter(SysMenu.parent_id == menu_id).count() > 0:
+        raise ServiceException("存在子菜单,不允许删除")
+    if db.query(SysRoleMenu).filter(SysRoleMenu.menu_id == menu_id).count() > 0:
+        raise ServiceException("菜单已分配,不允许删除")
+    db.query(SysMenu).filter(SysMenu.menu_id == menu_id).delete()
+    db.commit()

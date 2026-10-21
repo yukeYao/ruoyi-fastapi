@@ -23,6 +23,16 @@ def get_login_location(ip: str) -> str:
     return "未知地点"
 
 
+def get_date_range_params(request: Request) -> tuple[str | None, str | None]:
+    """
+    读取形如 `params[beginTime]=xxx&params[endTime]=xxx` 的时间范围查询参数。
+    前端用这种"方括号"写法传参，FastAPI 的 Query() 无法直接声明，只能从 query_params 里手动取。
+    """
+    begin = request.query_params.get("params[beginTime]")
+    end = request.query_params.get("params[endTime]")
+    return begin, end
+
+
 def parse_user_agent(request: Request) -> tuple[str, str]:
     """返回 (浏览器, 操作系统)，解析失败时给出兜底文案"""
     ua = parse(request.headers.get("user-agent", ""))
