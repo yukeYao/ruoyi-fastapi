@@ -126,6 +126,40 @@ def test_invalid_token_returns_401():
     assert resp.json()["code"] == 401
 
 
+def test_user_without_permission_gets_403():
+    """种子角色 ry/common 几乎分配了全部菜单权限，专门建一个零权限角色才能测出 403"""
+    admin_headers = {"Authorization": f"Bearer {_login('admin', 'admin123').json()['token']}"}
+
+    role_resp = client.post(
+        "/system/role",
+        headers=admin_headers,
+        json={"roleName": "no_perm_role", "roleKey": "no_perm_role", "roleSort": 99, "status": "0", "menuIds": []},
+    )
+    assert role_resp.json()["code"] == 200
+    role_id = client.get("/system/role/list", headers=admin_headers, params={"roleName": "no_perm_role"}).json()["rows"][0]["roleId"]
+
+    user_resp = client.post(
+        "/system/user",
+        headers=admin_headers,
+        json={
+            "userName": "no_perm_user",
+            "nickName": "无权限用户",
+            "password": "Passw0rd!",
+            "status": "0",
+            "postIds": [],
+            "roleIds": [role_id],
+        },
+    )
+    assert user_resp.json()["code"] == 200
+
+    resp = _login("no_perm_user", "Passw0rd!")
+    token = resp.json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+
+    resp = client.get("/system/user/list", headers=headers)
+    assert resp.json()["code"] == 403
+
+
 def test_normal_user_has_limited_role_and_no_admin_permission():
     """普通用户 ry 登录后角色不是 admin，权限不是 *:*:*"""
     resp = _login("ry", "admin123")
