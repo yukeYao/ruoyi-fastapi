@@ -16,6 +16,7 @@ from app.routers.system import config as system_config
 from app.routers.system import dept as system_dept
 from app.routers.system import dict as system_dict
 from app.routers.system import menu as system_menu
+from app.routers.system import notice as system_notice
 from app.routers.system import post as system_post
 from app.routers.system import role as system_role
 from app.routers.system import user as system_user
@@ -45,6 +46,7 @@ app.include_router(system_dept.router)
 app.include_router(system_post.router)
 app.include_router(system_dict.router)
 app.include_router(system_config.router)
+app.include_router(system_notice.router)
 app.include_router(monitor_operlog.router)
 app.include_router(monitor_logininfor.router)
 app.include_router(monitor_online.router)

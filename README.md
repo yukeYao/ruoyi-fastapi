@@ -140,3 +140,6 @@ cd backend
   读取了但不做匹配拦截）。
 - **部门/菜单的 `updateSort` 拖拽排序接口**：Java 源码里有，但 RuoYi-Vue3 这版前端页面并未调用
   （没有拖拽排序 UI），所以没有实现对应后端接口。
+- **首页铃铛的通知公告接口**：只为铃铛组件补了 `/system/notice/listTop`、`markRead`、`markReadAll`
+  三个最小实现（需登录，`listTop` 固定返回空列表和 `unreadCount: 0`，标记已读直接返回成功不落库），
+  让首页不再报 404；通知公告菜单本身的增删改查仍未实现。
