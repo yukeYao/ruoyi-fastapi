@@ -1,0 +1,13 @@
+fastapi
+uvicorn[standard]
+sqlalchemy>=2.0
+pymysql
+cryptography
+redis
+pyjwt
+bcrypt
+pillow
+pydantic-settings
+user-agents
+pytest
+httpx

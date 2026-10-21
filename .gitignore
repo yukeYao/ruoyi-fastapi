@@ -1,0 +1,19 @@
+# 参考源码，不提交
+reference/
+
+# 前端依赖与构建产物
+ruoyi-ui/node_modules/
+ruoyi-ui/dist/
+
+# 后端虚拟环境与敏感配置
+backend/.venv/
+backend/.env
+backend/__pycache__/
+backend/**/__pycache__/
+*.pyc
+
+# IDE / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
