@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.constants import PWD_ERR_CNT_KEY_PREFIX
 from app.core.redis_client import redis_client
+from app.core.request_utils import normalize_datetime_range
 from app.core.response import model_to_camel_dict
 from app.models.sys_logininfor import SysLogininfor
 
@@ -43,10 +44,11 @@ def list_logininfor(
         query = query.filter(SysLogininfor.user_name.like(f"%{user_name}%"))
     if status:
         query = query.filter(SysLogininfor.status == status)
+    begin_time, end_time = normalize_datetime_range(begin_time, end_time)
     if begin_time:
-        query = query.filter(SysLogininfor.login_time >= begin_time[:10])
+        query = query.filter(SysLogininfor.login_time >= begin_time)
     if end_time:
-        query = query.filter(SysLogininfor.login_time <= end_time[:10])
+        query = query.filter(SysLogininfor.login_time <= end_time)
 
     total = query.count()
     rows = query.order_by(SysLogininfor.info_id.desc()).offset((page_num - 1) * page_size).limit(page_size).all()

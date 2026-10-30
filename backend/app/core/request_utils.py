@@ -33,6 +33,22 @@ def get_date_range_params(request: Request) -> tuple[str | None, str | None]:
     return begin, end
 
 
+def normalize_datetime_range(begin: str | None, end: str | None) -> tuple[str | None, str | None]:
+    """
+    把日期范围补全成可以直接和 datetime 列比较的完整时间。
+
+    操作日志、登录日志页面传的是 `yyyy-MM-dd HH:mm:ss`（结束时间是 23:59:59），若依 Java 版直接拿它和列比较。
+    如果只传了 `yyyy-MM-dd`，MySQL 会把它当成当天 00:00:00，结束日期当天的记录就全被漏掉，
+    所以只有日期时：开始补 00:00:00，结束补 23:59:59。
+    不在列上套 DATE() 来比较，是为了让 oper_time / login_time 上的索引继续生效。
+    """
+    if begin and len(begin) == 10:
+        begin = f"{begin} 00:00:00"
+    if end and len(end) == 10:
+        end = f"{end} 23:59:59"
+    return begin, end
+
+
 def parse_user_agent(request: Request) -> tuple[str, str]:
     """返回 (浏览器, 操作系统)，解析失败时给出兜底文案"""
     ua = parse(request.headers.get("user-agent", ""))

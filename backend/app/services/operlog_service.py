@@ -1,6 +1,7 @@
 """操作日志查询/删除/清空，对应若依 SysOperlogController + ISysOperLogService"""
 from sqlalchemy.orm import Session
 
+from app.core.request_utils import normalize_datetime_range
 from app.core.response import model_to_camel_dict
 from app.models.sys_oper_log import SysOperLog
 
@@ -25,10 +26,11 @@ def list_oper_logs(
         query = query.filter(SysOperLog.status == status)
     if oper_name:
         query = query.filter(SysOperLog.oper_name.like(f"%{oper_name}%"))
+    begin_time, end_time = normalize_datetime_range(begin_time, end_time)
     if begin_time:
-        query = query.filter(SysOperLog.oper_time >= begin_time[:10])
+        query = query.filter(SysOperLog.oper_time >= begin_time)
     if end_time:
-        query = query.filter(SysOperLog.oper_time <= end_time[:10])
+        query = query.filter(SysOperLog.oper_time <= end_time)
 
     total = query.count()
     rows = query.order_by(SysOperLog.oper_id.desc()).offset((page_num - 1) * page_size).limit(page_size).all()
