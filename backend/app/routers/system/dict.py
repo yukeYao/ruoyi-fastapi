@@ -1,10 +1,11 @@
 """字典只读路由，对应 SysDictTypeController / SysDictDataController 的读接口"""
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.core.database import get_db
 from app.core.deps import get_login_user, has_perm
 from app.core.exceptions import ServiceException
+from app.core.request_utils import get_date_range_params
 from app.core.response import ajax_success, table_data_info
 from app.services import dict_service
 
@@ -48,6 +49,7 @@ def dict_type_optionselect(db: Session = Depends(get_db), login_user: dict = Dep
 
 @router.get("/type/list")
 def list_dict_types(
+    request: Request,
     dictName: str | None = Query(default=None),
     dictType: str | None = Query(default=None),
     status: str | None = Query(default=None),
@@ -56,7 +58,8 @@ def list_dict_types(
     db: Session = Depends(get_db),
     login_user: dict = Depends(has_perm("system:dict:list")),
 ):
-    rows, total = dict_service.list_dict_types(db, dictName, dictType, status, pageNum, pageSize)
+    begin_time, end_time = get_date_range_params(request)
+    rows, total = dict_service.list_dict_types(db, dictName, dictType, status, begin_time, end_time, pageNum, pageSize)
     return table_data_info(rows, total)
 
 

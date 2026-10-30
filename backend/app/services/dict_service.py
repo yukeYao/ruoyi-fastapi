@@ -1,4 +1,5 @@
 """字典只读查询，对应若依 SysDictTypeController / SysDictDataController 的读接口（本项目不做字典增删改）"""
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.core.constants import STATUS_NORMAL
@@ -8,7 +9,14 @@ from app.models.sys_dict_type import SysDictType
 
 
 def list_dict_types(
-    db: Session, dict_name: str | None, dict_type: str | None, status: str | None, page_num: int, page_size: int
+    db: Session,
+    dict_name: str | None,
+    dict_type: str | None,
+    status: str | None,
+    begin_time: str | None,
+    end_time: str | None,
+    page_num: int,
+    page_size: int,
 ) -> tuple[list[dict], int]:
     query = db.query(SysDictType)
     if dict_name:
@@ -17,6 +25,11 @@ def list_dict_types(
         query = query.filter(SysDictType.dict_type.like(f"%{dict_type}%"))
     if status:
         query = query.filter(SysDictType.status == status)
+    # 对应 SysDictTypeMapper 的 date_format(create_time,'%Y%m%d')：两边都按天比较，前端只传 yyyy-MM-dd
+    if begin_time:
+        query = query.filter(func.date(SysDictType.create_time) >= begin_time[:10])
+    if end_time:
+        query = query.filter(func.date(SysDictType.create_time) <= end_time[:10])
 
     total = query.count()
     rows = query.order_by(SysDictType.dict_id).offset((page_num - 1) * page_size).limit(page_size).all()

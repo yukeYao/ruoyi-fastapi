@@ -1,5 +1,5 @@
 """角色管理业务逻辑，对应若依 SysRoleController + SysRoleServiceImpl"""
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session, aliased
 
 from app.core.audit import fill_create_fields, fill_update_fields
@@ -15,7 +15,15 @@ from app.models.sys_user import SysUser
 from app.models.sys_user_role import SysUserRole
 
 
-def _role_query(db: Session, login_user: dict, role_name: str | None = None, status: str | None = None, role_key: str | None = None):
+def _role_query(
+    db: Session,
+    login_user: dict,
+    role_name: str | None = None,
+    status: str | None = None,
+    role_key: str | None = None,
+    begin_time: str | None = None,
+    end_time: str | None = None,
+):
     """对应 selectRoleList（带 @DataScope）：返回 (query, 角色别名 r)"""
     r = aliased(SysRole, name="r")
     ur = aliased(SysUserRole, name="ur")
@@ -36,6 +44,11 @@ def _role_query(db: Session, login_user: dict, role_name: str | None = None, sta
         query = query.filter(r.status == status)
     if role_key:
         query = query.filter(r.role_key.like(f"%{role_key}%"))
+    # 对应 SysRoleMapper 的 date_format(r.create_time,'%Y%m%d')：两边都按天比较，前端只传 yyyy-MM-dd
+    if begin_time:
+        query = query.filter(func.date(r.create_time) >= begin_time[:10])
+    if end_time:
+        query = query.filter(func.date(r.create_time) <= end_time[:10])
 
     scope_expr = build_data_scope_filter(login_user, dept_alias="d", user_alias="u")
     if scope_expr:
@@ -44,9 +57,17 @@ def _role_query(db: Session, login_user: dict, role_name: str | None = None, sta
 
 
 def list_roles(
-    db: Session, login_user: dict, role_name: str | None, status: str | None, role_key: str | None, page_num: int, page_size: int
+    db: Session,
+    login_user: dict,
+    role_name: str | None,
+    status: str | None,
+    role_key: str | None,
+    begin_time: str | None,
+    end_time: str | None,
+    page_num: int,
+    page_size: int,
 ) -> tuple[list[dict], int]:
-    query, r = _role_query(db, login_user, role_name, status, role_key)
+    query, r = _role_query(db, login_user, role_name, status, role_key, begin_time, end_time)
     total = query.count()
     rows = query.order_by(r.role_sort).offset((page_num - 1) * page_size).limit(page_size).all()
     return [model_to_camel_dict(role) for role in rows], total

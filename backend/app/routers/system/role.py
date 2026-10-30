@@ -1,11 +1,12 @@
 """角色管理路由，对应 SysRoleController，路径前缀 /system/role"""
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.orm import Session
 
 from app.core.constants import BIZ_DELETE, BIZ_GRANT, BIZ_INSERT, BIZ_UPDATE
 from app.core.database import get_db
 from app.core.deps import has_perm
 from app.core.oper_log import log
+from app.core.request_utils import get_date_range_params
 from app.core.response import ajax_success, table_data_info
 from app.schemas.auth_user import AuthUserCancelBody
 from app.schemas.role import RoleChangeStatus, RoleCreate, RoleDataScope, RoleUpdate
@@ -16,6 +17,7 @@ router = APIRouter(prefix="/system/role")
 
 @router.get("/list")
 def list_roles(
+    request: Request,
     roleName: str | None = Query(default=None),
     status: str | None = Query(default=None),
     roleKey: str | None = Query(default=None),
@@ -24,7 +26,8 @@ def list_roles(
     db: Session = Depends(get_db),
     login_user: dict = Depends(has_perm("system:role:list")),
 ):
-    rows, total = role_service.list_roles(db, login_user, roleName, status, roleKey, pageNum, pageSize)
+    begin_time, end_time = get_date_range_params(request)
+    rows, total = role_service.list_roles(db, login_user, roleName, status, roleKey, begin_time, end_time, pageNum, pageSize)
     return table_data_info(rows, total)
 
 
