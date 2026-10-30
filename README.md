@@ -1,5 +1,7 @@
 # RuoYi FastAPI 后端（精简学习版）
 
+[![后端测试](https://github.com/yukeYao/ruoyi-fastapi/actions/workflows/test.yml/badge.svg?branch=master)](https://github.com/yukeYao/ruoyi-fastapi/actions/workflows/test.yml)
+
 参考若依（RuoYi）架构，使用 **FastAPI** 重写后端，前端复用官方 **RuoYi-Vue3** 源码（不改业务代码）。
 这是一个用来学习后端原理、准备校招面试的练手项目，刻意保持精简：接口路径、参数、返回格式与若依
 Java 版对齐，但只实现了核心功能（登录认证 + 系统管理 + 系统监控），详见「未实现的功能」一节。
