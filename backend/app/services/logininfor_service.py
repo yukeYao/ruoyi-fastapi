@@ -5,7 +5,6 @@ from sqlalchemy.orm import Session
 
 from app.core.constants import PWD_ERR_CNT_KEY_PREFIX
 from app.core.redis_client import redis_client
-from app.core.request_utils import normalize_datetime_range
 from app.core.response import model_to_camel_dict
 from app.models.sys_logininfor import SysLogininfor
 
@@ -32,8 +31,8 @@ def list_logininfor(
     ipaddr: str | None,
     user_name: str | None,
     status: str | None,
-    begin_time: str | None,
-    end_time: str | None,
+    begin_time: datetime | None,
+    end_time: datetime | None,
     page_num: int,
     page_size: int,
 ) -> tuple[list[dict], int]:
@@ -44,7 +43,7 @@ def list_logininfor(
         query = query.filter(SysLogininfor.user_name.like(f"%{user_name}%"))
     if status:
         query = query.filter(SysLogininfor.status == status)
-    begin_time, end_time = normalize_datetime_range(begin_time, end_time)
+    # 日期范围已在 core/date_range.py 校验并补全成 datetime，这里直接比较，列上不套函数以便走 login_time 索引
     if begin_time:
         query = query.filter(SysLogininfor.login_time >= begin_time)
     if end_time:

@@ -53,7 +53,7 @@ def list_users(
     db: Session = Depends(get_db),
     login_user: dict = Depends(has_perm("system:user:list")),
 ):
-    begin_time, end_time = get_date_range_params(request)
+    begin_time, end_time = get_date_range_params(request, by_day=True)
     rows, total = user_service.list_users(
         db, login_user, userName, status, phonenumber, deptId, begin_time, end_time, pageNum, pageSize
     )

@@ -1,5 +1,6 @@
 """字典只读查询，对应若依 SysDictTypeController / SysDictDataController 的读接口（本项目不做字典增删改）"""
-from sqlalchemy import func
+from datetime import datetime
+
 from sqlalchemy.orm import Session
 
 from app.core.constants import STATUS_NORMAL
@@ -13,8 +14,8 @@ def list_dict_types(
     dict_name: str | None,
     dict_type: str | None,
     status: str | None,
-    begin_time: str | None,
-    end_time: str | None,
+    begin_time: datetime | None,
+    end_time: datetime | None,
     page_num: int,
     page_size: int,
 ) -> tuple[list[dict], int]:
@@ -25,11 +26,11 @@ def list_dict_types(
         query = query.filter(SysDictType.dict_type.like(f"%{dict_type}%"))
     if status:
         query = query.filter(SysDictType.status == status)
-    # 对应 SysDictTypeMapper 的 date_format(create_time,'%Y%m%d')：两边都按天比较，前端只传 yyyy-MM-dd
+    # 对应 SysDictTypeMapper 的 date_format 按天比较：get_date_range_params(by_day=True) 已补全成当天 00:00:00 / 23:59:59
     if begin_time:
-        query = query.filter(func.date(SysDictType.create_time) >= begin_time[:10])
+        query = query.filter(SysDictType.create_time >= begin_time)
     if end_time:
-        query = query.filter(func.date(SysDictType.create_time) <= end_time[:10])
+        query = query.filter(SysDictType.create_time <= end_time)
 
     total = query.count()
     rows = query.order_by(SysDictType.dict_id).offset((page_num - 1) * page_size).limit(page_size).all()

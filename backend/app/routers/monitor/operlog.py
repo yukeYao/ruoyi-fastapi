@@ -25,7 +25,7 @@ def list_oper_logs(
     db: Session = Depends(get_db),
     login_user: dict = Depends(has_perm("monitor:operlog:list")),
 ):
-    begin_time, end_time = get_date_range_params(request)
+    begin_time, end_time = get_date_range_params(request, by_day=False)
     rows, total = operlog_service.list_oper_logs(db, title, businessType, status, operName, begin_time, end_time, pageNum, pageSize)
     return table_data_info(rows, total)
 

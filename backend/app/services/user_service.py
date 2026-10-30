@@ -3,7 +3,9 @@
 
 数据权限、唯一性校验、"不允许操作超级管理员"、"不能删除自己" 等规则严格对照 Java 版。
 """
-from sqlalchemy import func, text
+from datetime import datetime
+
+from sqlalchemy import text
 from sqlalchemy.orm import Session, aliased
 
 from app.core.audit import fill_create_fields, fill_update_fields
@@ -35,8 +37,8 @@ def list_users(
     status: str | None,
     phonenumber: str | None,
     dept_id: int | None,
-    begin_time: str | None,
-    end_time: str | None,
+    begin_time: datetime | None,
+    end_time: datetime | None,
     page_num: int,
     page_size: int,
 ) -> tuple[list[dict], int]:
@@ -55,10 +57,11 @@ def list_users(
         query = query.filter(
             text(f"(u.dept_id = {int(dept_id)} OR u.dept_id IN (SELECT dept_id FROM sys_dept WHERE FIND_IN_SET({int(dept_id)}, ancestors)))")
         )
+    # 对应 SysUserMapper 的 date_format 按天比较：get_date_range_params(by_day=True) 已补全成当天 00:00:00 / 23:59:59
     if begin_time:
-        query = query.filter(func.date(u.create_time) >= begin_time[:10])
+        query = query.filter(u.create_time >= begin_time)
     if end_time:
-        query = query.filter(func.date(u.create_time) <= end_time[:10])
+        query = query.filter(u.create_time <= end_time)
 
     scope_expr = build_data_scope_filter(login_user, dept_alias="d", user_alias="u")
     if scope_expr:

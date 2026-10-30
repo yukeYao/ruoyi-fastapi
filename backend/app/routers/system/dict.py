@@ -58,7 +58,7 @@ def list_dict_types(
     db: Session = Depends(get_db),
     login_user: dict = Depends(has_perm("system:dict:list")),
 ):
-    begin_time, end_time = get_date_range_params(request)
+    begin_time, end_time = get_date_range_params(request, by_day=True)
     rows, total = dict_service.list_dict_types(db, dictName, dictType, status, begin_time, end_time, pageNum, pageSize)
     return table_data_info(rows, total)
 

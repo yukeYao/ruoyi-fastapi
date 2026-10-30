@@ -1,5 +1,7 @@
 """角色管理业务逻辑，对应若依 SysRoleController + SysRoleServiceImpl"""
-from sqlalchemy import func, text
+from datetime import datetime
+
+from sqlalchemy import text
 from sqlalchemy.orm import Session, aliased
 
 from app.core.audit import fill_create_fields, fill_update_fields
@@ -21,8 +23,8 @@ def _role_query(
     role_name: str | None = None,
     status: str | None = None,
     role_key: str | None = None,
-    begin_time: str | None = None,
-    end_time: str | None = None,
+    begin_time: datetime | None = None,
+    end_time: datetime | None = None,
 ):
     """对应 selectRoleList（带 @DataScope）：返回 (query, 角色别名 r)"""
     r = aliased(SysRole, name="r")
@@ -44,11 +46,11 @@ def _role_query(
         query = query.filter(r.status == status)
     if role_key:
         query = query.filter(r.role_key.like(f"%{role_key}%"))
-    # 对应 SysRoleMapper 的 date_format(r.create_time,'%Y%m%d')：两边都按天比较，前端只传 yyyy-MM-dd
+    # 对应 SysRoleMapper 的 date_format 按天比较：get_date_range_params(by_day=True) 已补全成当天 00:00:00 / 23:59:59
     if begin_time:
-        query = query.filter(func.date(r.create_time) >= begin_time[:10])
+        query = query.filter(r.create_time >= begin_time)
     if end_time:
-        query = query.filter(func.date(r.create_time) <= end_time[:10])
+        query = query.filter(r.create_time <= end_time)
 
     scope_expr = build_data_scope_filter(login_user, dept_alias="d", user_alias="u")
     if scope_expr:
@@ -62,8 +64,8 @@ def list_roles(
     role_name: str | None,
     status: str | None,
     role_key: str | None,
-    begin_time: str | None,
-    end_time: str | None,
+    begin_time: datetime | None,
+    end_time: datetime | None,
     page_num: int,
     page_size: int,
 ) -> tuple[list[dict], int]:

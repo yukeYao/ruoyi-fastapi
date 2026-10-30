@@ -14,6 +14,8 @@ from typing import Any
 
 from sqlalchemy.inspection import inspect as sa_inspect
 
+from app.core.constants import DATE_FORMAT, DATETIME_FORMAT
+
 _CAMEL_RE = re.compile(r"_([a-z0-9])")
 
 
@@ -25,9 +27,9 @@ def to_camel(snake: str) -> str:
 def _format_value(value: Any) -> Any:
     """datetime/date 统一格式化为若依前端约定的字符串格式"""
     if isinstance(value, datetime):
-        return value.strftime("%Y-%m-%d %H:%M:%S")
+        return value.strftime(DATETIME_FORMAT)
     if isinstance(value, date):
-        return value.strftime("%Y-%m-%d")
+        return value.strftime(DATE_FORMAT)
     return value
 
 

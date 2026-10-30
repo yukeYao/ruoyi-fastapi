@@ -14,6 +14,13 @@ ADMIN_ROLE_KEY = "admin"
 STATUS_NORMAL = "0"
 STATUS_DISABLE = "1"
 
+# 日期时间格式：返回给前端的时间字段、前端传来的日期范围参数都用这两种格式
+DATE_FORMAT = "%Y-%m-%d"
+DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
+# 日期范围只传日期时补全的时分秒：开始取当天最早、结束取当天最晚，结束日期当天才能整天查到
+DAY_BEGIN_TIME = "00:00:00"
+DAY_END_TIME = "23:59:59"
+
 # 删除标志：存在/已删除
 DEL_FLAG_NORMAL = "0"
 DEL_FLAG_DELETED = "2"

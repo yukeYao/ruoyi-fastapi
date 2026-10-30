@@ -24,7 +24,7 @@ def list_logininfor(
     db: Session = Depends(get_db),
     login_user: dict = Depends(has_perm("monitor:logininfor:list")),
 ):
-    begin_time, end_time = get_date_range_params(request)
+    begin_time, end_time = get_date_range_params(request, by_day=False)
     rows, total = logininfor_service.list_logininfor(db, ipaddr, userName, status, begin_time, end_time, pageNum, pageSize)
     return table_data_info(rows, total)
 

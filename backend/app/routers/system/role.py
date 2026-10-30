@@ -26,7 +26,7 @@ def list_roles(
     db: Session = Depends(get_db),
     login_user: dict = Depends(has_perm("system:role:list")),
 ):
-    begin_time, end_time = get_date_range_params(request)
+    begin_time, end_time = get_date_range_params(request, by_day=True)
     rows, total = role_service.list_roles(db, login_user, roleName, status, roleKey, begin_time, end_time, pageNum, pageSize)
     return table_data_info(rows, total)
 
