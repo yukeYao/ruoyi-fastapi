@@ -82,13 +82,22 @@ def _dumps(payload: dict) -> str:
     return json.dumps(payload, ensure_ascii=False, default=str)
 
 
-def tool_success(data: Any, max_chars: int = AGENT_MAX_TOOL_RESULT_CHARS) -> str:
+# 受数据权限限制的查询结果为空时附带的说明：空结果只表示"当前数据范围内没找到"，
+# 模型曾据此把"不存在或不在你的数据范围内"改说成"用户不存在"。
+# 文案对范围外的真实数据和根本不存在的数据完全一样，不泄露是否存在
+MSG_EMPTY_IN_SCOPE = ("当前数据权限范围内未查询到匹配的数据。这不代表数据不存在：可能不存在，也可能不在你的数据范围内。"
+                      "回复时不能断言不存在，应说明“不存在或不在你的数据范围内”。")
+
+
+def tool_success(data: Any, max_chars: int = AGENT_MAX_TOOL_RESULT_CHARS, note: str = "") -> str:
     """
     成功结果。超长时优先从末尾丢弃 rows 里的记录（保持 JSON 合法、模型仍能读懂），
     并标记 truncated；仍然超长就只给截断后的文本预览。
+    note 是服务端生成的说明，放在外层（与 untrusted_data 分开），模型可以信任。
     """
     data = strip_forbidden(data)
-    payload = {"ok": True, "untrusted_data": data}
+    head = {"ok": True, "note": note} if note else {"ok": True}
+    payload = {**head, "untrusted_data": data}
     text = _dumps(payload)
     if len(text) <= max_chars:
         return text
@@ -98,12 +107,12 @@ def tool_success(data: Any, max_chars: int = AGENT_MAX_TOOL_RESULT_CHARS) -> str
         while rows:
             rows.pop()
             trimmed = {**data, "rows": rows, "truncated": True}
-            text = _dumps({"ok": True, "untrusted_data": trimmed})
+            text = _dumps({**head, "untrusted_data": trimmed})
             if len(text) <= max_chars:
                 return text
 
     preview = _dumps(data)[: max_chars // 2]
-    return _dumps({"ok": True, "truncated": True, "untrusted_preview": preview})
+    return _dumps({**head, "truncated": True, "untrusted_preview": preview})
 
 
 def tool_error(message: str) -> str:

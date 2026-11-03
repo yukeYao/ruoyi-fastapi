@@ -53,6 +53,8 @@ class ToolSpec:
     output_fields: tuple[str, ...] = ()
     # 需要脱敏的字段：{字段名: MASK_PHONE / MASK_EMAIL}
     masks: dict[str, str] = field(default_factory=dict)
+    # 结果受数据权限过滤（用户、角色、部门）：为空时 policy 附带"不存在或不在数据范围内"的说明
+    data_scoped: bool = False
     # 写工具：preview(db, 已带权限上下文的 login_user, 已校验的参数, 操作者会话 token) -> 预览 dict，
     # 只读，预览里的 target.userId / userName 由 propose 冻结；
     # execute(..., 冻结的目标 {userId, userName}) -> 结果 dict，只按冻结的目标操作
@@ -199,15 +201,15 @@ _TOOL_LIST = [
     ToolSpec("search_users", "按条件分页查询用户（受数据权限限制），手机号和邮箱已脱敏", RISK_READ, "system:user:list",
              SearchUsersArgs, _search_users,
              ("userId", "userName", "nickName", "deptId", "dept.deptName", "status", "phonenumber", "email",
-              "loginIp", "loginDate", "createTime"), _USER_MASKS),
+              "loginIp", "loginDate", "createTime"), _USER_MASKS, data_scoped=True),
     ToolSpec("get_user_detail", "查询单个用户详情及其角色（受数据权限限制）", RISK_READ, "system:user:query",
              UserIdArgs, _get_user_detail,
              ("userId", "userName", "nickName", "deptId", "status", "phonenumber", "email", "sex",
               "loginIp", "loginDate", "createTime", "remark", "roles"), _USER_MASKS),
     ToolSpec("list_roles", "分页查询角色", RISK_READ, "system:role:list", ListRolesArgs, _list_roles,
-             ("roleId", "roleName", "roleKey", "roleSort", "dataScope", "status", "createTime")),
+             ("roleId", "roleName", "roleKey", "roleSort", "dataScope", "status", "createTime"), data_scoped=True),
     ToolSpec("list_departments", "查询部门列表", RISK_READ, "system:dept:list", ListDeptsArgs, _list_departments,
-             ("deptId", "parentId", "deptName", "leader", "status", "orderNum")),
+             ("deptId", "parentId", "deptName", "leader", "status", "orderNum"), data_scoped=True),
     ToolSpec("search_login_logs", "分页查询最近若干天的登录日志", RISK_READ, "monitor:logininfor:list",
              SearchLoginLogsArgs, _search_login_logs,
              ("infoId", "userName", "ipaddr", "loginLocation", "browser", "os", "status", "msg", "loginTime")),
