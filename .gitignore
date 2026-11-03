@@ -11,6 +11,8 @@ backend/.env
 backend/__pycache__/
 backend/**/__pycache__/
 backend/.pytest_cache/
+# 智能助手 checkpoint（SQLite），属于运行时数据
+backend/data/
 *.pyc
 
 # IDE / 系统

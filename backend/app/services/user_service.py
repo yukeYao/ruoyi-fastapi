@@ -30,18 +30,17 @@ def _row_to_dict(user: SysUser, dept_name: str | None, leader: str | None) -> di
     return data
 
 
-def list_users(
+def _user_query(
     db: Session,
     login_user: dict,
-    user_name: str | None,
-    status: str | None,
-    phonenumber: str | None,
-    dept_id: int | None,
-    begin_time: datetime | None,
-    end_time: datetime | None,
-    page_num: int,
-    page_size: int,
-) -> tuple[list[dict], int]:
+    user_name: str | None = None,
+    status: str | None = None,
+    phonenumber: str | None = None,
+    dept_id: int | None = None,
+    begin_time: datetime | None = None,
+    end_time: datetime | None = None,
+):
+    """对应 selectUserList（带 @DataScope）：返回 (query, 用户别名 u)，供列表和按 ID 的数据范围校验共用"""
     u = aliased(SysUser, name="u")
     d = aliased(SysDept, name="d")
 
@@ -66,7 +65,22 @@ def list_users(
     scope_expr = build_data_scope_filter(login_user, dept_alias="d", user_alias="u")
     if scope_expr:
         query = query.filter(text(scope_expr))
+    return query, u
 
+
+def list_users(
+    db: Session,
+    login_user: dict,
+    user_name: str | None,
+    status: str | None,
+    phonenumber: str | None,
+    dept_id: int | None,
+    begin_time: datetime | None,
+    end_time: datetime | None,
+    page_num: int,
+    page_size: int,
+) -> tuple[list[dict], int]:
+    query, u = _user_query(db, login_user, user_name, status, phonenumber, dept_id, begin_time, end_time)
     total = query.count()
     rows = query.order_by(u.user_id).offset((page_num - 1) * page_size).limit(page_size).all()
     return [_row_to_dict(user, dept_name, leader) for user, dept_name, leader in rows], total
@@ -75,8 +89,10 @@ def list_users(
 def check_user_data_scope(db: Session, login_user: dict, user_id: int) -> None:
     if login_user.get("user_id") == SUPER_ADMIN_ID:
         return
-    rows, _ = list_users(db, login_user, None, None, None, None, None, None, 1, 1000)
-    if not any(r["userId"] == user_id for r in rows):
+    # 在同一个带数据权限的查询上按 ID 精确过滤（参数化），不再先取前 1000 条到内存里找：
+    # 用户多于 1000 时排在后面的用户会被误判为越权，而且每次校验都要拉一整页数据
+    query, u = _user_query(db, login_user)
+    if query.filter(u.user_id == user_id).first() is None:
         raise ServiceException("没有权限访问用户数据！")
 
 

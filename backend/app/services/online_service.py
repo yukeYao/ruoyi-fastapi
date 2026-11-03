@@ -1,15 +1,15 @@
 """在线用户监控，对应若依 SysUserOnlineController（直接扫 Redis login_tokens:*，没有单独的表）"""
 import json
 
-from app.core.constants import LOGIN_TOKEN_KEY_PREFIX
+from app.core.constants import LOGIN_TOKEN_KEY_PREFIX, ONLINE_SCAN_COUNT
 from app.core.redis_client import redis_client
 from app.core.request_utils import get_login_location
 
 
 def list_online_users(ipaddr: str | None, user_name: str | None) -> list[dict]:
-    keys = redis_client.keys(LOGIN_TOKEN_KEY_PREFIX + "*")
+    # 用 SCAN 增量遍历而不是 KEYS：KEYS 一次性遍历整个库，key 多时会阻塞单线程的 Redis
     result = []
-    for key in keys:
+    for key in redis_client.scan_iter(match=LOGIN_TOKEN_KEY_PREFIX + "*", count=ONLINE_SCAN_COUNT):
         raw = redis_client.get(key)
         if not raw:
             continue

@@ -1,5 +1,5 @@
 """
-初始化数据库：创建 `ry-vue`（utf8mb4）并导入 sql/ry_20260417.sql。
+初始化数据库：创建 `ry-vue`（utf8mb4），导入 sql/ry_20260417.sql，再导入智能助手的 sql/agent.sql。
 
 不依赖本机 `mysql` 命令行（PATH 里没有），纯用 PyMySQL 执行。
 用法：在 backend/ 目录下运行 `.venv/Scripts/python.exe scripts/init_db.py`
@@ -15,7 +15,10 @@ from pymysql.constants import CLIENT
 
 from app.config import settings
 
-SQL_FILE = Path(__file__).resolve().parent.parent / "sql" / "ry_20260417.sql"
+SQL_DIR = Path(__file__).resolve().parent.parent / "sql"
+SQL_FILE = SQL_DIR / "ry_20260417.sql"
+# 若依脚本会 drop 重建 sys_menu/sys_role_menu，Agent 的菜单必须在它之后导入
+AGENT_SQL_FILE = SQL_DIR / "agent.sql"
 
 
 def create_database_if_not_exists() -> None:
@@ -40,14 +43,14 @@ def create_database_if_not_exists() -> None:
         conn.close()
 
 
-def import_sql_file() -> None:
+def import_sql_file(sql_file: Path = SQL_FILE) -> None:
     """
     用 CLIENT.MULTI_STATEMENTS 一次性执行整份 SQL 脚本。
     之所以不手动按分号切分语句，是因为 sql 文件里公告表的插入数据包含大量
     带分号的 HTML 内容，简单按 ';' split 会把语句切坏；MULTI_STATEMENTS
     让 MySQL 自己按协议解析语句边界，更稳妥。
     """
-    sql_text = SQL_FILE.read_text(encoding="utf-8")
+    sql_text = sql_file.read_text(encoding="utf-8")
 
     conn = pymysql.connect(
         host=settings.mysql_host,
@@ -65,12 +68,27 @@ def import_sql_file() -> None:
             while cursor.nextset():
                 pass
         conn.commit()
-        print(f"已导入 {SQL_FILE.name}")
+        print(f"已导入 {sql_file.name}")
     finally:
         conn.close()
+
+
+def remove_agent_checkpoint_files() -> None:
+    """
+    agent.sql 会 drop 重建会话表，旧的 checkpoint 线程就成了没有归属的孤儿数据，所以一并删除。
+    SQLite 在 WAL 模式下还会有 -wal、-shm 两个伴随文件，里面同样可能有未合并的对话内容。
+    只在手动执行本脚本时调用：测试的 conftest 也会 import_sql_file，但不能删开发环境的文件。
+    """
+    base = settings.agent_checkpoint_file
+    for path in (base, Path(str(base) + "-wal"), Path(str(base) + "-shm")):
+        if path.exists():
+            path.unlink()
+            print(f"已删除 checkpoint 文件 {path}")
 
 
 if __name__ == "__main__":
     create_database_if_not_exists()
     import_sql_file()
+    import_sql_file(AGENT_SQL_FILE)
+    remove_agent_checkpoint_files()
     print("数据库初始化完成")
