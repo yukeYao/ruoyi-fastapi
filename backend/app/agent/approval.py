@@ -27,7 +27,7 @@ from app.agent.policy import (
     is_write_call,
     parse_args,
 )
-from app.agent.serialization import strip_forbidden, tool_success
+from app.agent.serialization import strip_forbidden
 from app.agent.tools import TOOLS
 from app.core.constants import (
     ACTION_APPROVED,
@@ -52,6 +52,7 @@ from app.services import agent_action_service as actions
 logger = logging.getLogger("ruoyi.agent")
 
 MSG_PREVIEW_FAILED = "生成操作预览失败"
+MSG_EXECUTED = "操作已执行成功"
 MSG_REJECTED = "用户已拒绝，不要重试"
 MSG_EXPIRED = "审批已过期，操作未执行；如仍需要，请重新提交"
 MSG_NOT_APPROVED = "操作未获批准，未执行"
@@ -133,22 +134,53 @@ def propose(ctx: AgentContext, conversation_id: str, message: AIMessage) -> dict
 # execute
 # ---------------------------------------------------------------------------
 
+# 各状态对应的服务端说明（可信字段）。executed：True 已执行成功；False 未执行；None 结果未知
+_OUTCOMES = {
+    ACTION_SUCCEEDED: (True, MSG_EXECUTED),
+    ACTION_REJECTED: (False, MSG_REJECTED),
+    ACTION_EXPIRED: (False, MSG_EXPIRED),
+    ACTION_PENDING: (False, MSG_NOT_APPROVED),
+    ACTION_APPROVED: (False, MSG_NOT_APPROVED),
+    ACTION_EXECUTING: (None, MSG_EXECUTION_UNKNOWN),
+    ACTION_FAILED: (False, MSG_EXECUTE_FAILED),
+}
+
+
+def outcome_payload(action) -> dict:
+    """
+    审批结果的 ToolMessage 内容，分两层：
+    - 外层是服务端可信字段：ok、executed、status、action_id、tool_name、message，全部由服务端根据
+      agent_action 的状态生成，模型应该据此判断"有没有执行"。之前把执行状态和业务数据一起包在
+      untrusted_data 里，真实模型把"已执行成功"总结成了"等待审批中"；
+    - untrusted_data 里是业务数据：目标用户名、执行结果、失败详情。这些可能含用户可控内容
+      （用户名、昵称等），只能当数据看。
+    """
+    executed, message = _OUTCOMES.get(action.status, (False, MSG_NOT_APPROVED))
+    data = {"target": json.loads(action.target_json) if action.target_json else None}
+    if action.status == ACTION_SUCCEEDED and action.result:
+        data["result"] = json.loads(action.result)
+    if action.status == ACTION_FAILED and action.error:
+        data["errorDetail"] = action.error
+    return {
+        "ok": action.status == ACTION_SUCCEEDED,
+        "executed": executed,
+        "status": action.status,
+        "action_id": action.action_id,
+        "tool_name": action.tool_name,
+        "message": message,
+        "untrusted_data": strip_forbidden(data),
+    }
+
+
 def _outcome_message(action, tool_call_id: str) -> ToolMessage:
     """按 action 的最终状态给模型一条结果；这里不执行任何写操作"""
-    name = action.tool_name
-    if action.status == ACTION_SUCCEEDED:
-        result = json.loads(action.result) if action.result else None
-        content = tool_success({"actionId": action.action_id, "status": action.status, "result": result})
-        return ToolMessage(content=content, tool_call_id=tool_call_id, name=name)
-    errors = {
-        ACTION_REJECTED: MSG_REJECTED,
-        ACTION_EXPIRED: MSG_EXPIRED,
-        ACTION_PENDING: MSG_NOT_APPROVED,
-        ACTION_APPROVED: MSG_NOT_APPROVED,
-        ACTION_EXECUTING: MSG_EXECUTION_UNKNOWN,
-        ACTION_FAILED: f"{MSG_EXECUTE_FAILED}：{action.error}",
-    }
-    return error_message(tool_call_id, name, errors.get(action.status, MSG_NOT_APPROVED))
+    payload = outcome_payload(action)
+    return ToolMessage(
+        content=json.dumps(payload, ensure_ascii=False, default=str),
+        tool_call_id=tool_call_id,
+        name=action.tool_name,
+        status="success" if payload["ok"] else "error",
+    )
 
 
 def _run(db, ctx: AgentContext, action) -> None:

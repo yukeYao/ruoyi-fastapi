@@ -173,7 +173,7 @@ def test_reject_does_not_execute(scripted_model):
     body = _reject(admin, action["actionId"])
     assert body["data"]["action"]["status"] == "REJECTED"
     assert body["data"]["action"]["decidedBy"] == "admin"
-    assert json.loads(seen["last"])["error"] == approval.MSG_REJECTED
+    assert json.loads(seen["last"])["message"] == approval.MSG_REJECTED
     assert _status(target) == "0" and _oper_logs(action["actionId"]) == []
     # 拒绝后再批准：不执行
     assert _approve(admin, action["actionId"])["msg"] == agent_service.MSG_ALREADY_DECIDED
@@ -188,7 +188,7 @@ def test_expired_action_not_executed(scripted_model):
     assert client.get(f"/agent/action/{action['actionId']}", headers=admin).json()["data"]["expired"] is True
     body = _approve(admin, action["actionId"])
     assert body["data"]["action"]["status"] == "EXPIRED"
-    assert json.loads(tool_results(body)["w1"]["content"])["error"] == approval.MSG_EXPIRED
+    assert json.loads(tool_results(body)["w1"]["content"])["message"] == approval.MSG_EXPIRED
     assert _status(target) == "0"
 
 
@@ -486,7 +486,7 @@ def test_new_message_after_expiry_settles_action_first(scripted_model):
     assert _action_row(action["actionId"])["status"] == "EXPIRED" and _status(target) == "0"
     history = client.get(f"/agent/conversation/{conv_id}/messages", headers=admin).json()
     tool = [m for m in history["data"] if m["type"] == "tool" and m["toolCallId"] == "w1"]
-    assert len(tool) == 1 and json.loads(tool[0]["content"])["error"] == approval.MSG_EXPIRED
+    assert len(tool) == 1 and json.loads(tool[0]["content"])["message"] == approval.MSG_EXPIRED
     assert history["pendingAction"] is None
 
 
@@ -554,7 +554,7 @@ def test_executing_after_crash_is_not_retried(scripted_model, monkeypatch):
 
     body = _approve(admin, action["actionId"])
     assert body["data"]["action"]["status"] == "EXECUTING"
-    assert json.loads(seen["last"])["error"] == approval.MSG_EXECUTION_UNKNOWN
+    assert json.loads(seen["last"])["message"] == approval.MSG_EXECUTION_UNKNOWN
     assert calls == [] and _status(target) == "0"
 
 
