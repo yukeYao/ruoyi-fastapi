@@ -7,7 +7,8 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 用绝对路径定位 backend/.env，避免因启动时的工作目录不同导致读取不到配置
-_ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+BACKEND_DIR = Path(__file__).resolve().parent.parent
+_ENV_FILE = BACKEND_DIR / ".env"
 
 
 class Settings(BaseSettings):
@@ -33,6 +34,14 @@ class Settings(BaseSettings):
     # 服务
     app_port: int = 8080
 
+    # 智能助手：模型走 OpenAI 兼容协议。密钥只放 .env 或环境变量，不写进仓库；
+    # 没配置 AGENT_API_KEY 时 /agent/chat 直接提示未配置，不会去猜默认值
+    agent_model: str = ""
+    agent_api_key: str = ""
+    agent_base_url: str = ""
+    # LangGraph checkpoint 的 SQLite 文件，相对路径按 backend/ 解析；backend/data/ 已加入 .gitignore
+    agent_checkpoint_path: str = "data/agent_checkpoints.sqlite"
+
     @property
     def sqlalchemy_database_uri(self) -> str:
         # ry-vue 数据库名含短横线，PyMySQL 连接字符串直接拼接即可，无需额外转义
@@ -40,6 +49,12 @@ class Settings(BaseSettings):
             f"mysql+pymysql://{self.mysql_user}:{self.mysql_password}"
             f"@{self.mysql_host}:{self.mysql_port}/{self.mysql_database}?charset=utf8mb4"
         )
+
+
+    @property
+    def agent_checkpoint_file(self) -> Path:
+        path = Path(self.agent_checkpoint_path)
+        return path if path.is_absolute() else BACKEND_DIR / path
 
 
 # 全局单例，其他模块直接 `from app.config import settings` 使用

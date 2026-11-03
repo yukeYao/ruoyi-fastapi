@@ -36,24 +36,36 @@ def get_login_user(authorization: str | None = Header(default=None)) -> dict:
     return login_user
 
 
+def user_has_perm(login_user: dict, perm: str) -> bool:
+    """只判断不抛异常：Agent 按权限过滤可绑定给模型的工具时用"""
+    if login_user.get("user_id") == SUPER_ADMIN_ID:
+        return True
+    permissions = set(login_user.get("permissions", []))
+    return ALL_PERMISSION in permissions or perm in permissions
+
+
+def check_perm(login_user: dict, perm: str) -> dict:
+    """
+    校验权限并返回带当前权限字符（PERMISSION_CONTEXT_KEY）的登录态副本，没有权限抛 403。
+    超级管理员（userId=1）权限是 *:*:*，拥有一切权限。
+
+    返回副本对应若依 hasPermi 里的 PermissionContextHolder.setContext(permission)，供数据权限
+    过滤挑选角色。从 has_perm 的闭包里抽出来，是为了让路由依赖和 Agent 工具执行层共用同一套
+    校验——工具不经过路由，如果另写一份，两边规则迟早会不一致。
+    """
+    if not user_has_perm(login_user, perm):
+        raise ServiceException("没有权限，请联系管理员授权", code=403)
+    return {**login_user, PERMISSION_CONTEXT_KEY: perm}
+
+
 def has_perm(perm: str):
     """
     权限依赖工厂：用法 `Depends(has_perm("system:user:list"))`。
-    超级管理员（userId=1）权限是 *:*:*，拥有一切权限。
-
-    返回的登录态是一份副本，带上当前接口的权限字符（PERMISSION_CONTEXT_KEY），对应若依
-    hasPermi 里的 PermissionContextHolder.setContext(permission)，供数据权限过滤挑选角色。
-    不用 ContextVar：同步依赖在线程池里执行，里面设置的 ContextVar 传不到路由函数。
+    不用 ContextVar 传权限字符：同步依赖在线程池里执行，里面设置的 ContextVar 传不到路由函数。
     """
 
     def _check(login_user: dict = Depends(get_login_user)) -> dict:
-        login_user = {**login_user, PERMISSION_CONTEXT_KEY: perm}
-        if login_user.get("user_id") == SUPER_ADMIN_ID:
-            return login_user
-        permissions = set(login_user.get("permissions", []))
-        if ALL_PERMISSION in permissions or perm in permissions:
-            return login_user
-        raise ServiceException("没有权限，请联系管理员授权", code=403)
+        return check_perm(login_user, perm)
 
     return _check
 

@@ -13,11 +13,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 os.environ["MYSQL_DATABASE"] = "ry-vue-test"
 os.environ["REDIS_DB"] = "1"
+# 测试不调用真实模型：清掉可能来自 .env 的配置，Agent 测试用 ScriptedChatModel 显式注入
+os.environ["AGENT_API_KEY"] = ""
 
 import pymysql
 import pytest
 
-from scripts.init_db import create_database_if_not_exists, import_sql_file
+from scripts.init_db import AGENT_SQL_FILE, create_database_if_not_exists, import_sql_file
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -25,6 +27,9 @@ def init_test_database():
     """每次测试会话开始前，重建测试库的表结构和初始数据"""
     create_database_if_not_exists()
     import_sql_file()
+    # 连续导入两次，验证 agent.sql 可重复执行（drop 重建，每次测试会话都从空表开始）
+    import_sql_file(AGENT_SQL_FILE)
+    import_sql_file(AGENT_SQL_FILE)
     yield
 
 
@@ -75,3 +80,49 @@ def login_and_get_token(client, username="admin", password="admin123") -> str:
 
 def auth_headers(client, username="admin", password="admin123") -> dict:
     return {"Authorization": f"Bearer {login_and_get_token(client, username, password)}"}
+
+
+# ---------------------------------------------------------------------------
+# 智能助手测试夹具
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def agent_checkpoint(tmp_path, monkeypatch):
+    """每个用例使用独立的临时 checkpoint 文件，不碰开发环境的 backend/data/"""
+    from app.agent import checkpointer
+    from app.config import settings
+
+    checkpointer.close_checkpointer()
+    path = tmp_path / "agent_checkpoints.sqlite"
+    monkeypatch.setattr(settings, "agent_checkpoint_path", str(path))
+    yield path
+    checkpointer.close_checkpointer()
+
+
+@pytest.fixture
+def scripted_model(monkeypatch, agent_checkpoint):
+    """
+    返回一个函数：传入脚本，得到注入到 /agent/chat 的 ScriptedChatModel。
+    路由每次请求都调用 get_chat_model()，这里让它总是返回同一个实例，测试结束后可以检查
+    模型看到的工具和消息。
+    """
+    from app.agent import model as agent_model
+
+    def _install(*script):
+        fake = agent_model.ScriptedChatModel(script=list(script))
+        monkeypatch.setattr(agent_model, "get_chat_model", lambda: fake)
+        return fake
+
+    return _install
+
+
+@pytest.fixture(autouse=True)
+def cleanup_agent_test_data():
+    """删除 tests/agent_helpers 建的用户和角色（只在用到这些 helper 的用例里有数据）"""
+    yield
+    from fastapi.testclient import TestClient
+
+    from main import app
+    from tests.agent_helpers import cleanup_created
+
+    cleanup_created(TestClient(app))

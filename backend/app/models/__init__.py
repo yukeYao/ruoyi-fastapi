@@ -1,6 +1,8 @@
 """
 统一导入所有模型，确保 Base.metadata 能收集到全部表（主要用于测试里建表等场景）。
 """
+from app.models.agent_action import AgentAction
+from app.models.agent_conversation import AgentConversation
 from app.models.sys_config import SysConfig
 from app.models.sys_dept import SysDept
 from app.models.sys_dict_data import SysDictData
@@ -17,6 +19,8 @@ from app.models.sys_user_post import SysUserPost
 from app.models.sys_user_role import SysUserRole
 
 __all__ = [
+    "AgentAction",
+    "AgentConversation",
     "SysConfig",
     "SysDept",
     "SysDictData",

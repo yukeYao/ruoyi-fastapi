@@ -8,7 +8,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.core.request_context import current_request
-from app.routers import auth
+from app.routers import agent, auth
 from app.routers.monitor import logininfor as monitor_logininfor
 from app.routers.monitor import online as monitor_online
 from app.routers.monitor import operlog as monitor_operlog
@@ -56,6 +56,7 @@ app.include_router(system_notice.router)
 app.include_router(monitor_operlog.router)
 app.include_router(monitor_logininfor.router)
 app.include_router(monitor_online.router)
+app.include_router(agent.router)
 
 if __name__ == "__main__":
     uvicorn.run("main:app", host="0.0.0.0", port=settings.app_port, reload=True)

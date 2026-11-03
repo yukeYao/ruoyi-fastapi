@@ -55,6 +55,7 @@ def _write_log(
     title: str,
     business_type: int,
     method: str,
+    request_method: str,
     url: str,
     oper_name: str,
     dept_name: str,
@@ -70,8 +71,8 @@ def _write_log(
         record = SysOperLog(
             title=title,
             business_type=business_type,
-            method=method,
-            request_method=method,
+            method=method[:200],
+            request_method=request_method[:10],
             oper_name=oper_name,
             dept_name=dept_name,
             oper_url=url[:255],
@@ -88,6 +89,40 @@ def _write_log(
         db.commit()
     finally:
         db.close()
+
+
+def record_oper_log(
+    title: str,
+    business_type: int,
+    login_user: dict | None,
+    params: dict,
+    result: Any,
+    status: int,
+    error_msg: str,
+    cost_time: int,
+    method: str = "",
+    request_method: str = "",
+    url: str = "",
+    ip: str = "",
+    background: bool = True,
+) -> None:
+    """
+    写一条操作日志：脱敏参数、序列化结果、截断长度后写库。
+
+    从 @log 里拆出来，是为了让不经过路由的写操作（智能助手审批后执行的工具）也能进入
+    现有的 sys_oper_log，而不是另建一套日志。@log 的行为保持不变（background=True 异步写）；
+    智能助手传 background=False 同步写，保证 agent_action 和操作日志在同一次请求里落库。
+    """
+    oper_param = _safe_json({k: _redact(v) for k, v in params.items()}, _MAX_PARAM_LENGTH)
+    json_result = _safe_json(result, _MAX_PARAM_LENGTH) if result is not None else ""
+    oper_name = (login_user or {}).get("user_name", "")
+    dept_name = (login_user or {}).get("dept_name") or ""
+    args = (title, business_type, method, request_method, url, oper_name, dept_name, ip, oper_param, json_result,
+            status, error_msg, cost_time)
+    if background:
+        _executor.submit(_write_log, *args)
+    else:
+        _write_log(*args)
 
 
 def log(title: str, business_type: int):
@@ -111,17 +146,19 @@ def log(title: str, business_type: int):
                 error_msg = str(exc)
                 raise
             finally:
-                cost_time = int((time.time() - start) * 1000)
-                params = {k: _redact(v) for k, v in kwargs.items() if k not in _SKIP_PARAM_NAMES}
-                oper_param = _safe_json(params, _MAX_PARAM_LENGTH)
-                json_result = _safe_json(result, _MAX_PARAM_LENGTH) if result is not None else ""
-                ip = get_client_ip(request) if request else ""
-                oper_name = (login_user or {}).get("user_name", "")
-                dept_name = (login_user or {}).get("dept_name") or ""
-                url = request.url.path if request else ""
-                method = request.method if request else ""
-                _executor.submit(
-                    _write_log, title, business_type, method, url, oper_name, dept_name, ip, oper_param, json_result, status, error_msg, cost_time
+                record_oper_log(
+                    title,
+                    business_type,
+                    login_user,
+                    {k: v for k, v in kwargs.items() if k not in _SKIP_PARAM_NAMES},
+                    result,
+                    status,
+                    error_msg,
+                    int((time.time() - start) * 1000),
+                    method=request.method if request else "",
+                    request_method=request.method if request else "",
+                    url=request.url.path if request else "",
+                    ip=get_client_ip(request) if request else "",
                 )
 
         return wrapper

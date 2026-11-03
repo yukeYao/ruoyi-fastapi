@@ -21,6 +21,7 @@ python main.py                 # 启动后端，监听 8080，带自动重载
 python scripts/init_db.py      # 建库 ry-vue 并导入若依 SQL（会覆盖数据）
 pytest -q                      # 全部测试（需要本机 MySQL 和 Redis 在运行）
 pytest -q tests/test_stage2_login.py   # 单个文件
+python -m evals.run_eval --runs 3      # 智能助手评估：调用真实模型，只能手动运行
 ```
 
 测试会自动使用独立的测试库 `ry-vue-test` 和 Redis db 1，不会影响开发数据。
@@ -34,6 +35,8 @@ pytest -q tests/test_stage2_login.py   # 单个文件
 | `app/models/` | ORM 模型，一表一文件 | Domain + Mapper |
 | `app/schemas/` | Pydantic 入参模型，继承 `CamelModel` | 请求体 |
 | `app/core/` | 与业务无关的基础设施 | common / framework |
+| `app/agent/` | 智能助手：工具规格、权限策略、审批、LangGraph 图 | — |
+| `evals/` | 智能助手评估（数据集、运行器、评分、报告模板） | — |
 
 ## 编码规则（违反任何一条都会导致前端出错或安全问题）
 
@@ -51,6 +54,29 @@ pytest -q tests/test_stage2_login.py   # 单个文件
 12. **常量**：状态值、Redis key 前缀、过期时间等写在 `core/constants.py`，不要在代码里写魔法字符串。
 13. 拼接到 SQL 的值只能来自服务端并经过 `int()` 转换；任何用户输入都必须走 ORM 参数化查询。
 
+## 智能助手（Agent）模块规范
+
+设计说明见 `docs/agent-design.md`。改动 `app/agent/`、`services/agent_*`、`routers/agent.py` 时必须遵守：
+
+1. **安全判断只在服务端**：权限、数据范围、目标解析、审批都不能依赖模型遵守提示词。提示词只用来提高体验。
+2. **工具**：只能调用现有 service，不提供任意 SQL、任意 HTTP、代码执行类工具。参数模型继承 `ToolArgs`（`extra="forbid"`），
+   声明 `perm`、输出字段白名单和脱敏字段。只读工具执行前再调 `check_perm`（绑定过滤不是安全边界）。
+3. **工具结果**：用 `serialization.tool_success / tool_error`。数据库里的数据放在 `untrusted_data`；
+   服务端生成的说明和状态放在外层（如审批结果的 `status / executed`、空结果的 `note`）。禁止返回密码、tokenId、完整手机号和邮箱。
+4. **写操作**：模型只提供 `user_name` 等业务参数；目标由服务端精确解析并冻结进 `target_json` 和 `args_hash`。
+   范围外和不存在必须返回同一句话。一个 action 只对应一个副作用。
+5. **审批状态机**：agent_action 的每次状态迁移都用 `agent_action_service.transition`（条件 UPDATE + rowcount）。
+   approval 节点只能调用 `interrupt()`，不能有副作用；所有副作用放在 execute 节点。EXECUTING 不自动重试。
+6. **结果以 agent_action 为准**：接口返回的状态、页面显示的状态都取自 agent_action 和 checkpoint，不解析模型回复。
+   模型总结失败不能把已到终态的操作报成"处理失败"。
+7. **运行时上下文**：登录态、模型只放在 `AgentContext`（Runtime context，不落盘），不能写进 state 或 config。
+8. **时限**：运行锁 `AGENT_RUN_LOCK_SECONDS` 必须大于运行时限加一次模型超时；模型客户端 `max_retries=0`。
+9. **日志与异常**：模型异常经 `ModelCallError` 脱敏后再抛出；日志里不能出现 Key、JWT、tokenId。
+10. **前端**：只允许 `views/agent/chat/index.vue` 和 `api/agent/chat.js`；内容一律纯文本渲染（不用 v-html，不渲染 Markdown）。
+11. **能力边界与循环保护**：缺少的能力由 `policy.capability_boundary` 从工具注册表生成，拼进本次运行的系统上下文，不写进 state；无权限的工具仍不绑定。循环保护（`graph.tools_node` / `propose_node`）只决定"何时停止"，不能用来放宽权限或审批，也不能推断用户意图替换写操作。
+12. **测试**：pytest 用 `ScriptedChatModel`（`scripted_model` fixture），不得调用真实模型，也不需要 Key。
+    行为测试检查数据库、Redis、checkpoint 的真实状态，不检查提示词文字。真实模型只在 `evals/` 和手动冒烟中使用，且只连测试库。
+
 ## 工作流程
 
 - **改动较大时先给方案**：涉及多个文件、或修改数据库查询逻辑时，先说明改哪些文件、为什么、怎么验证，等我确认后再动手。
@@ -67,5 +93,7 @@ pytest -q tests/test_stage2_login.py   # 单个文件
 ## 已知问题（待修复）
 
 - 密码错误计数、验证码校验是"先读后写"，不是原子操作。
-- 在线用户列表使用 `KEYS`，应改为 `SCAN`。
-- `check_user_data_scope` 查前 1000 条再在内存中查找，应改为按 ID 直接查询。
+
+已修复（回归测试见 `tests/test_known_issues_fix.py`）：在线用户列表改用 `SCAN`；`check_user_data_scope` 改为按 ID 直接查询。
+
+智能助手的已知局限见 `docs/agent-design.md` 第 7 节。
