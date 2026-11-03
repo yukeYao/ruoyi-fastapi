@@ -90,7 +90,11 @@ AGENT_CHAT_PERM = "agent:chat:use"
 # Redis key：每用户单运行锁、请求频率限制
 AGENT_RUN_LOCK_KEY_PREFIX = "agent_run_lock:"
 AGENT_RATE_LIMIT_KEY_PREFIX = "agent_rate_limit:"
-# 运行锁的过期时间（秒）：兜底防止进程崩溃后锁永远不释放，需大于单次运行的最长耗时
+# 单次运行（一次对话或一次审批恢复）的总时限（秒）：每次调用模型前检查剩余时间，
+# 剩余时间不足一次模型调用的超时就停止，保证整次运行一定在时限内结束
+AGENT_RUN_DEADLINE_SECONDS = 180
+# 运行锁的过期时间（秒）：兜底防止进程崩溃后锁永远不释放。必须大于"运行时限 + 一次模型调用超时"，
+# 否则锁可能在运行还没结束时过期，同一用户就能并发跑第二个运行（测试里有断言）
 AGENT_RUN_LOCK_SECONDS = 300
 # 频率限制：每个窗口（秒）内每用户最多请求次数
 AGENT_RATE_LIMIT_WINDOW_SECONDS = 60
@@ -111,5 +115,21 @@ AGENT_MAX_HISTORY_CHARS = 24000
 AGENT_MAX_INPUT_CHARS = 2000
 # 会话标题取首条消息的前若干字
 AGENT_TITLE_CHARS = 30
-# 模型调用超时（秒）
-AGENT_MODEL_TIMEOUT_SECONDS = 60
+# 模型调用超时（秒）；不自动重试，所以这也是单次模型调用的最长耗时
+AGENT_MODEL_TIMEOUT_SECONDS = 30
+
+# 写操作审批（agent_action）
+AGENT_ACTION_EXPIRE_MINUTES = 10
+ACTION_PENDING = "PENDING"
+ACTION_APPROVED = "APPROVED"
+ACTION_REJECTED = "REJECTED"
+ACTION_EXPIRED = "EXPIRED"
+ACTION_EXECUTING = "EXECUTING"
+ACTION_SUCCEEDED = "SUCCEEDED"
+ACTION_FAILED = "FAILED"
+# 审批决定（Command(resume=...) 的值）
+DECISION_APPROVE = "approve"
+DECISION_REJECT = "reject"
+DECISION_EXPIRE = "expire"
+# 操作日志里标记"来源是智能助手"：写在 sys_oper_log.method 字段前缀
+AGENT_OPER_LOG_SOURCE = "智能助手"

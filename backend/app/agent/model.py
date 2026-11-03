@@ -76,8 +76,9 @@ def create_chat_model() -> BaseChatModel:
         api_key=settings.agent_api_key,
         base_url=settings.agent_base_url or None,
         timeout=AGENT_MODEL_TIMEOUT_SECONDS,
-        # 重试交给用户手动重发：模型调用期间持有运行锁，自动重试会拉长锁占用时间
-        max_retries=1,
+        # 不自动重试：单次调用最长耗时就是 timeout，运行总时限的计算（graph.agent_node）依赖这一点；
+        # 失败交给用户手动重发
+        max_retries=0,
         temperature=0,
     )
 

@@ -1,7 +1,7 @@
 """
 恢复：模拟服务重启（关闭并重新打开 SQLite checkpoint、换一个新的模型实例和新的 Runtime context），
 同一个 conversation_id 能接着之前的历史继续对话；并确认 context（登录态）没有落盘。
-阶段 2 再补充 interrupt 之后的恢复测试。
+interrupt 之后重启再批准/拒绝的恢复测试见 test_agent_approval.py::test_restart_between_interrupt_and_decision。
 """
 import json
 

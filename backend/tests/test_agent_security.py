@@ -100,10 +100,14 @@ def test_injection_in_login_log_cannot_trigger_write(scripted_model):
         # 注入内容只出现在 untrusted_data 里，系统提示词明确要求把它当数据
         assert INJECTION[:20] in json.dumps(json.loads(seen["tool_content"])["untrusted_data"], ensure_ascii=False)
         assert isinstance(fake.calls[0][0], SystemMessage) and "untrusted_data" in fake.calls[0][0].content
-        # 写工具根本没有绑定给模型；硬调用也只得到错误 ToolMessage
-        assert "change_user_status" not in fake.bound_tool_names
+        # 被注入的模型发出两个写调用：只有第一个生成 PENDING 审批，第二个要求逐个提交；都没有执行
         results = tool_results(body)
-        assert all(json.loads(results[i]["content"])["ok"] is False for i in ("w1", "w2"))
+        assert "w1" not in results  # 等待审批
+        assert json.loads(results["w2"]["content"])["error"] == policy.MSG_ONE_WRITE_AT_A_TIME
+        action = body["data"]["pendingAction"]
+        assert action["status"] == "PENDING" and action["args"] == {"status": "1", "user_id": 2}
+        # 预览由服务端生成：目标、当前状态都来自数据库
+        assert action["preview"]["target"]["userName"] == "ry" and action["preview"]["currentState"] == "正常"
 
         # 数据没有变化：ry 仍是正常状态、仍然在线
         assert db.execute(text("SELECT status FROM sys_user WHERE user_id = 2")).scalar_one() == "0"
@@ -149,21 +153,49 @@ def test_no_secret_in_results_response_or_checkpoint(scripted_model, agent_check
         call("list_online_sessions", {"user_name": "ag_canary_u"}),
         call("search_login_logs", {"user_name": "ag_canary_u"}),
     ]
-    scripted_model(tool_msg(*calls), final("查完了"))
-    body = chat(client, admin, "查一下 ag_canary_u 的情况")
+
+    def then_logout(messages, tools):
+        return tool_msg(call("force_logout_user", {"user_name": "ag_canary_u"}, "w2"))
+
+    # 先查询，再停用（审批），再强制下线（审批）：覆盖读工具、两个写工具、agent_action 和操作日志
+    scripted_model(
+        tool_msg(*calls),
+        tool_msg(call("change_user_status", {"user_id": user_id, "status": "1"}, "w1")),
+        then_logout,
+        final("处理完了"),
+    )
+    body = chat(client, admin, "查一下 ag_canary_u 的情况，然后停用并下线")
     assert body["code"] == 200, body
     results = tool_results(body)
     assert all(json.loads(results[c["id"]]["content"])["ok"] for c in calls)
+    first = client.post(f"/agent/action/{body['data']['pendingAction']['actionId']}/approve", headers=admin).json()
+    second = client.post(f"/agent/action/{first['data']['pendingAction']['actionId']}/approve", headers=admin).json()
+    assert second["data"]["action"]["status"] == "SUCCEEDED" and second["data"]["reply"] == "处理完了"
+    action_ids = [first["data"]["action"]["actionId"], second["data"]["action"]["actionId"]]
 
     conv_id = body["data"]["conversationId"]
     history = client.get(f"/agent/conversation/{conv_id}/messages", headers=admin).text
     disk = _sqlite_bytes(agent_checkpoint)
-    # 确认工具结果确实写进了 checkpoint（脱敏后的手机号在），避免断言空跑
+    db = SessionLocal()
+    action_rows = json.dumps(
+        [dict(r._mapping) for r in db.execute(text("SELECT * FROM agent_action WHERE conversation_id = :c"), {"c": conv_id})],
+        default=str, ensure_ascii=False,
+    )
+    # 只检查智能助手写入的操作日志：通过"用户管理"页面新增用户时，现有 @log 本来就会记录手机号和邮箱
+    agent_logs = json.dumps(
+        [dict(r._mapping) for r in db.execute(text("SELECT * FROM sys_oper_log WHERE method LIKE '智能助手%'"))],
+        default=str, ensure_ascii=False,
+    )
+    db.close()
+
+    # 确认数据确实落盘了，避免断言空跑
     assert b"139****4321" in disk
+    assert all(a in action_rows and a in agent_logs for a in action_ids)
     for canary in canaries:
-        assert canary not in json.dumps(body, ensure_ascii=False), canary
-        assert canary not in history, canary
-        assert canary.encode() not in disk, canary
+        for name, haystack in (("响应", json.dumps([body, first, second], ensure_ascii=False)), ("历史", history),
+                               ("agent_action", action_rows), ("sys_oper_log", agent_logs)):
+            assert canary not in haystack, (name, canary)
+        assert canary.encode() not in disk, ("checkpoint", canary)
 
 
 # ---------------------------------------------------------------------------

@@ -38,3 +38,17 @@ def list_online_users(ipaddr: str | None, user_name: str | None) -> list[dict]:
 
 def force_logout(token_id: str) -> None:
     redis_client.delete(LOGIN_TOKEN_KEY_PREFIX + token_id)
+
+
+def list_session_token_ids(user_name: str) -> list[str]:
+    """
+    按用户名在服务端解析该用户的全部会话 tokenId，供智能助手"强制下线"使用。
+    tokenId 只在服务端内部流转：不返回给模型、不写进预览、agent_action 和操作日志，
+    否则拿到它就能单独踢掉任意会话。
+    """
+    token_ids = []
+    for key in redis_client.scan_iter(match=LOGIN_TOKEN_KEY_PREFIX + "*", count=ONLINE_SCAN_COUNT):
+        raw = redis_client.get(key)
+        if raw and json.loads(raw).get("user_name") == user_name:
+            token_ids.append(key[len(LOGIN_TOKEN_KEY_PREFIX):])
+    return token_ids

@@ -11,6 +11,7 @@ from app.agent import policy
 from app.agent.graph import MSG_STEP_LIMIT
 from app.agent.serialization import mask_email, mask_phone, tool_success
 from app.core.constants import (
+    LOGIN_TOKEN_KEY_PREFIX,
     AGENT_MAX_MODEL_STEPS,
     AGENT_MAX_TOOL_CALLS_PER_STEP,
     AGENT_MAX_TOOL_RESULT_CHARS,
@@ -20,7 +21,7 @@ from app.core.database import SessionLocal
 from app.core.redis_client import redis_client
 from main import app
 from tests.agent_helpers import call, chat, final, tool_msg, tool_results
-from tests.conftest import auth_headers
+from tests.conftest import auth_headers, login_and_get_token
 
 client = TestClient(app)
 
@@ -49,10 +50,17 @@ def test_mixed_read_and_write_only_runs_read(scripted_model):
     db.close()
 
 
-def test_write_only_is_not_executed_in_stage1(scripted_model):
+def test_write_only_creates_pending_action_without_executing(scripted_model):
+    login_and_get_token(client, "ry", "admin123")
     write = call("force_logout_user", {"user_name": "ry"})
     body, _ = _admin_chat(scripted_model, tool_msg(write), final())
-    assert _content(tool_results(body)[write["id"]]) == {"ok": False, "error": policy.MSG_WRITE_NOT_OPEN}
+    # 审批中的调用暂不回复 ToolMessage（等审批结果），图停在 interrupt 上
+    assert write["id"] not in tool_results(body)
+    action = body["data"]["pendingAction"]
+    assert action["status"] == "PENDING" and action["toolName"] == "force_logout_user"
+    # ry 仍在线
+    online = [json.loads(redis_client.get(k)) for k in redis_client.scan_iter(LOGIN_TOKEN_KEY_PREFIX + "*")]
+    assert any(u["user_name"] == "ry" for u in online)
 
 
 def test_unknown_tool_and_invalid_args_are_handled(scripted_model):

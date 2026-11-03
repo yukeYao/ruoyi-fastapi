@@ -4,7 +4,7 @@ import json
 from fastapi.testclient import TestClient
 
 from app.agent.policy import MSG_NO_PERMISSION
-from app.agent.tools import RISK_READ, TOOLS
+from app.agent.tools import TOOLS
 from main import app
 from tests.agent_helpers import (
     MENU_AGENT,
@@ -21,7 +21,7 @@ from tests.conftest import auth_headers
 
 client = TestClient(app)
 
-READ_TOOLS = sorted(name for name, spec in TOOLS.items() if spec.risk == RISK_READ)
+ALL_TOOLS = sorted(TOOLS)
 
 
 def test_without_agent_perm_returns_403(scripted_model):
@@ -45,11 +45,18 @@ def test_model_only_sees_permitted_tools(scripted_model):
     assert fake.bound_tool_names == ["search_users"]
 
 
-def test_admin_sees_all_read_tools_but_no_write_tools(scripted_model):
+def test_admin_sees_all_tools(scripted_model):
     fake = scripted_model(final())
     chat(client, auth_headers(client), "你好")
-    assert sorted(fake.bound_tool_names) == READ_TOOLS
-    assert "change_user_status" not in fake.bound_tool_names
+    assert sorted(fake.bound_tool_names) == ALL_TOOLS
+
+
+def test_write_tool_bound_only_with_its_perm(scripted_model):
+    """写工具同样按权限过滤：有用户修改权限(1002)才看得到 change_user_status，看不到另外两个写工具"""
+    fake = scripted_model(final())
+    _, headers = user_with_menus(client, "editor", [MENU_AGENT, MENU_USER, 1002])
+    chat(client, headers, "你好")
+    assert sorted(fake.bound_tool_names) == ["change_user_status", "search_users"]
 
 
 def test_user_without_any_tool_perm_gets_no_tools(scripted_model):

@@ -17,7 +17,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.agent.serialization import MASK_EMAIL, MASK_PHONE
-from app.core.constants import AGENT_MAX_PAGE_SIZE
+from app.agent import write_tools
+from app.core.constants import AGENT_MAX_PAGE_SIZE, BIZ_FORCE, BIZ_OTHER, BIZ_UPDATE
 from app.services import dept_service, logininfor_service, online_service, operlog_service, role_service, user_service
 
 RISK_READ = "read"
@@ -52,6 +53,13 @@ class ToolSpec:
     output_fields: tuple[str, ...] = ()
     # 需要脱敏的字段：{字段名: MASK_PHONE / MASK_EMAIL}
     masks: dict[str, str] = field(default_factory=dict)
+    # 写工具：(db, 已带权限上下文的 login_user, 已校验的参数, 操作者自己的会话 token) -> dict
+    # preview 只读、生成审批预览；execute 重新校验后调用现有 service
+    preview: Callable[[Session, dict, Any, str | None], dict] | None = None
+    execute: Callable[[Session, dict, Any, str | None], dict] | None = None
+    # 写入 sys_oper_log 的模块标题和业务类型，与对应的现有路由 @log 保持一致
+    oper_title: str = ""
+    business_type: int = BIZ_OTHER
 
 
 def _since(days: int) -> datetime:
@@ -168,8 +176,7 @@ def _list_online_sessions(db: Session, login_user: dict, args: ListOnlineArgs) -
 
 
 # ---------------------------------------------------------------------------
-# 写工具：阶段 1 只登记元数据（用于识别"同一轮读写混合"），不绑定给模型、不执行；
-# 阶段 2 补上服务端预览、审批和执行。
+# 写工具：模型调用后只生成 PENDING 审批（预览见 write_tools.py），用户批准后服务端才执行
 # ---------------------------------------------------------------------------
 
 class ChangeUserStatusArgs(ToolArgs):
@@ -207,9 +214,18 @@ _TOOL_LIST = [
     # 不返回 tokenId：拿到它就能强制下线任意会话；强制下线工具改为按用户名在服务端解析会话
     ToolSpec("list_online_sessions", "查询在线会话", RISK_READ, "monitor:online:list", ListOnlineArgs, _list_online_sessions,
              ("userName", "deptName", "ipaddr", "loginLocation", "browser", "os", "loginTime")),
-    ToolSpec("change_user_status", "启用或停用用户账号（需用户审批）", RISK_WRITE, "system:user:edit", ChangeUserStatusArgs),
-    ToolSpec("unlock_user_account", "解除账号的密码错误锁定（需用户审批）", RISK_WRITE, "monitor:logininfor:unlock", UserNameArgs),
-    ToolSpec("force_logout_user", "强制下线该用户的全部会话（需用户审批）", RISK_WRITE, "monitor:online:forceLogout", UserNameArgs),
+    ToolSpec("change_user_status", "启用或停用用户账号。只会提交审批，用户批准后才执行；停用不会让已登录会话下线",
+             RISK_WRITE, "system:user:edit", ChangeUserStatusArgs,
+             preview=write_tools.preview_change_user_status, execute=write_tools.execute_change_user_status,
+             oper_title="用户管理", business_type=BIZ_UPDATE),
+    ToolSpec("unlock_user_account", "清除账号的密码错误次数（解除锁定）。只会提交审批，用户批准后才执行",
+             RISK_WRITE, "monitor:logininfor:unlock", UserNameArgs,
+             preview=write_tools.preview_unlock_user_account, execute=write_tools.execute_unlock_user_account,
+             oper_title="账户解锁", business_type=BIZ_OTHER),
+    ToolSpec("force_logout_user", "强制下线该用户的全部在线会话。只会提交审批，用户批准后才执行；不会停用账号",
+             RISK_WRITE, "monitor:online:forceLogout", UserNameArgs,
+             preview=write_tools.preview_force_logout_user, execute=write_tools.execute_force_logout_user,
+             oper_title="在线用户", business_type=BIZ_FORCE),
 ]
 
 TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in _TOOL_LIST}
