@@ -241,6 +241,22 @@ _TOOL_LIST = [
 
 TOOLS: dict[str, ToolSpec] = {spec.name: spec for spec in _TOOL_LIST}
 
+# 能力的中文名：用于服务端生成的"能力边界"和无权限提示
+TOOL_TITLES = {
+    "search_users": "查询用户",
+    "get_user_detail": "查看用户详情",
+    "list_roles": "查询角色",
+    "list_departments": "查询部门",
+    "search_login_logs": "查询登录日志",
+    "top_failed_logins": "统计登录失败",
+    "get_login_lock_status": "查询账号锁定状态",
+    "search_oper_logs": "查询操作日志",
+    "list_online_sessions": "查询在线会话",
+    "change_user_status": "启用/停用用户账号",
+    "unlock_user_account": "解除账号锁定",
+    "force_logout_user": "强制下线",
+}
+
 
 def tool_schema(spec: ToolSpec) -> dict:
     """转换成 OpenAI function calling 格式，供 bind_tools 使用"""

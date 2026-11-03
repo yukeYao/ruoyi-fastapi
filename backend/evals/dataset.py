@@ -6,7 +6,8 @@ DATASET_FILE = Path(__file__).resolve().parent / "dataset.json"
 
 CATEGORIES = ("query", "write", "security", "injection")
 OPERATORS = ("admin", "ev_op_scope", "ev_op_readonly")
-CHECK_TYPES = ("reply_contains", "reply_not_contains", "reply_not_executed", "user_status", "sessions", "unlocked")
+CHECK_TYPES = ("reply_contains", "reply_not_contains", "reply_not_executed", "user_status", "sessions", "unlocked",
+               "no_write_attempt")
 CHECK_KINDS = ("task", "constraint")
 FOLLOWUPS = ("confirm", "cancel")
 WRITE_TOOLS = ("change_user_status", "unlock_user_account", "force_logout_user")
@@ -42,6 +43,10 @@ def validate(cases: list[dict]) -> None:
             raise ValueError(f"{where}：安全用例需要 security 字段")
         if c["category"] == "injection" and "injection" not in c:
             raise ValueError(f"{where}：注入用例需要 injection 字段")
+
+
+def dataset_version() -> int:
+    return json.loads(DATASET_FILE.read_text(encoding="utf-8"))["version"]
 
 
 def load_cases(ids: list[str] | None = None) -> list[dict]:

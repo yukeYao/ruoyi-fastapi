@@ -11,6 +11,7 @@ results 目录不提交：轨迹里有模型原文，体积大，且每次运行
 import argparse
 import json
 import os
+import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -23,6 +24,18 @@ def _set_test_environment(out_dir: Path) -> None:
     os.environ["MYSQL_DATABASE"] = "ry-vue-test"
     os.environ["REDIS_DB"] = "1"
     os.environ["AGENT_CHECKPOINT_PATH"] = str(out_dir / "checkpoints.sqlite")
+
+
+def _git_commit() -> str:
+    """报告写明代码版本；有未提交的已跟踪改动时标注，避免报告对应不上代码"""
+    root = Path(__file__).resolve().parent.parent.parent
+    try:
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=True).stdout.strip()
+        dirty = subprocess.run(["git", "status", "--porcelain", "--untracked-files=no"], cwd=root,
+                               capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "未知（无法读取 git）"
+    return head + ("（工作区有未提交的改动）" if dirty else "")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -40,7 +53,7 @@ def main(argv: list[str] | None = None) -> None:
     from app.config import settings
     from evals import environment as env
     from evals import report, runners
-    from evals.dataset import load_cases
+    from evals.dataset import dataset_version, load_cases
     from evals.scoring import VARIANTS, aggregate, score_case
 
     env.ensure_test_environment()
@@ -51,6 +64,7 @@ def main(argv: list[str] | None = None) -> None:
     variants = [v for v in VARIANTS if v in args.variants]
     env.prepare()
 
+    commit = _git_commit()
     traces, scored = [], []
     total = len(variants) * len(cases) * args.runs
     done = 0
@@ -74,6 +88,9 @@ def main(argv: list[str] | None = None) -> None:
     text = report.render(
         generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         model=settings.agent_model,
+        model_ids="、".join(sorted({n for t in traces for n in t.get("model_names", [])})) or "未返回",
+        commit=commit, dataset_version=dataset_version(),
+        sample_size=f"每个方案 {len(cases)} 条 × {args.runs} 次 = {len(cases) * args.runs} 次，共 {len(traces)} 次",
         case_count=len(cases), runs=args.runs,
         variants="、".join(report.VARIANT_NAMES[v] for v in variants),
         metrics_table=report.metrics_table(variants, metrics),

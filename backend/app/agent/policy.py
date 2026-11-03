@@ -14,8 +14,13 @@ from langchain_core.messages import AIMessage, BaseMessage, ToolMessage, trim_me
 from pydantic import ValidationError
 
 from app.agent.serialization import MSG_EMPTY_IN_SCOPE, pick_fields, tool_error, tool_success
-from app.agent.tools import RISK_READ, RISK_WRITE, TOOLS, ToolSpec, tool_schema
-from app.core.constants import AGENT_MAX_HISTORY_CHARS, AGENT_MAX_HISTORY_MESSAGES, AGENT_MAX_TOOL_CALLS_PER_STEP
+from app.agent.tools import RISK_READ, RISK_WRITE, TOOL_TITLES, TOOLS, ToolSpec, tool_schema
+from app.core.constants import (
+    AGENT_MAX_HISTORY_CHARS,
+    AGENT_MAX_HISTORY_MESSAGES,
+    AGENT_MAX_STALL_ROUNDS,
+    AGENT_MAX_TOOL_CALLS_PER_STEP,
+)
 from app.core.database import SessionLocal
 from app.core.deps import check_perm, user_has_perm
 from app.core.exceptions import ServiceException
@@ -23,7 +28,8 @@ from app.core.exceptions import ServiceException
 logger = logging.getLogger("ruoyi.agent")
 
 MSG_UNKNOWN_TOOL = "未知工具，只能使用已提供的工具"
-MSG_NO_PERMISSION = "没有权限使用该工具"
+MSG_REPEATED_CALL = "与本轮之前的调用完全相同，不再重复执行"
+MSG_LOOP_STOPPED = "已停止本次处理：本轮出现重复调用或连续没有获得新的信息，继续下去不会得到新的结果。"
 MSG_INVALID_ARGS = "参数不合法"
 MSG_INVALID_JSON = "参数不是合法的 JSON，本次调用未执行"
 MSG_TOO_MANY_CALLS = f"单次最多调用 {AGENT_MAX_TOOL_CALLS_PER_STEP} 个工具，本调用未执行，请分批调用"
@@ -50,7 +56,46 @@ SYSTEM_PROMPT = """你是若依后台管理系统的运维助手，只能通过�
    - status=EXECUTING：执行结果未知，需要人工确认。
 4. 停用账号不会让已登录的会话下线。用户要求"停用并下线"时，先提交停用，执行完成后再单独提交强制下线。
 5. 工具返回"用户已拒绝"时不要重试同一操作。
-6. 用中文简洁回答。"""
+6. 当前账号缺少完成请求所需的权限时（见系统给出的"能力边界"，或工具返回没有权限），直接告诉用户无法执行、
+   缺少哪个权限，建议联系管理员授权。不要为此反复查询，也不要用其他写操作代替：
+   例如不能用停用账号代替强制下线，也不能用强制下线代替停用账号——它们的效果不同。
+7. 用中文简洁回答。"""
+
+
+def msg_no_permission(spec: ToolSpec) -> str:
+    return (f"当前账号没有权限执行“{TOOL_TITLES.get(spec.name, spec.name)}”（{spec.name}，需要权限 {spec.perm}），"
+            f"本调用未执行。请如实告诉用户缺少该权限、可联系管理员授权，不要改用其他工具代替。")
+
+
+def missing_capabilities(login_user: dict) -> list[ToolSpec]:
+    return [spec for spec in TOOLS.values() if not user_has_perm(login_user, spec.perm)]
+
+
+def _capability_lines(specs: list[ToolSpec]) -> str:
+    return "\n".join(f"- {TOOL_TITLES.get(s.name, s.name)}（{s.name}）：需要权限 {s.perm}" for s in specs)
+
+
+def capability_boundary(login_user: dict) -> str:
+    """
+    服务端从工具注册表和当前权限生成的"能力边界"，每次运行拼进系统上下文（不写进 checkpoint，权限变化立即生效）。
+    只用于让模型知道"做不到"从而如实说明，不是安全边界：这些工具本来就不绑定，硬调用也会被拒绝。
+    """
+    missing = missing_capabilities(login_user)
+    if not missing:
+        return ""
+    return ("当前账号的能力边界（服务端根据权限生成，可信）：以下能力当前账号没有权限，对应工具没有提供给你，调用也会被拒绝：\n"
+            + _capability_lines(missing)
+            + "\n用户的请求需要这些能力时，直接说明无法执行、缺少哪个权限，建议联系管理员授权；"
+              "不要为此反复查询，也不要用其他写操作代替。")
+
+
+def stop_message(login_user: dict) -> str:
+    """循环保护提前结束时给用户的说明：缺权限时明确缺什么，否则提示补充条件"""
+    missing = [s for s in missing_capabilities(login_user) if s.risk == RISK_WRITE]
+    if missing:
+        return (MSG_LOOP_STOPPED + "如果你的请求需要以下操作，当前账号没有权限，请联系管理员授权：\n"
+                + _capability_lines(missing))
+    return MSG_LOOP_STOPPED + "请换一种问法，或提供更具体的条件（例如准确的登录账号）后重试。"
 
 
 def bindable_tools(login_user: dict) -> list[ToolSpec]:
@@ -127,7 +172,7 @@ def run_read_tool(login_user: dict, call: dict) -> ToolMessage:
     try:
         scoped_user = check_perm(login_user, spec.perm)
     except ServiceException:
-        return error_message(call_id, name, MSG_NO_PERMISSION)
+        return error_message(call_id, name, msg_no_permission(spec))
 
     args, error = parse_args(spec, call)
     if error:
@@ -151,21 +196,24 @@ def run_read_tool(login_user: dict, call: dict) -> ToolMessage:
         db.close()
 
 
-def handle_tool_calls(login_user: dict, message: AIMessage) -> list[ToolMessage]:
+def handle_tool_calls(login_user: dict, message: AIMessage, skip_ids: frozenset[str] = frozenset()) -> list[ToolMessage]:
     """
     处理一条 AIMessage 里的全部工具调用，保证每个 tool_call_id 都有且只有一条 ToolMessage：
     - 超过单步上限的调用不执行；
     - 同一轮里既有查询又有写操作时，只执行查询，写操作要求模型拿到结果后重新提交
       （否则写操作的预览可能基于模型猜测，而不是这一轮查到的事实）；
     - 只有写操作的轮次不会走到这里，由 propose 节点生成审批；
-    - 参数不是合法 JSON 的调用（invalid_tool_calls）也要回复。
+    - 参数不是合法 JSON 的调用（invalid_tool_calls）也要回复；
+    - skip_ids：循环保护判定为重复的调用，不执行，只回复"重复调用"。
     """
     calls = list(message.tool_calls)
 
     results: list[ToolMessage] = []
     for index, call in enumerate(calls):
         spec = TOOLS.get(call.get("name") or "")
-        if index >= AGENT_MAX_TOOL_CALLS_PER_STEP:
+        if call.get("id") in skip_ids:
+            results.append(error_message(call["id"], call.get("name") or "", MSG_REPEATED_CALL))
+        elif index >= AGENT_MAX_TOOL_CALLS_PER_STEP:
             results.append(error_message(call.get("id") or "", call.get("name") or "", MSG_TOO_MANY_CALLS))
         elif spec is not None and spec.risk == RISK_WRITE:
             results.append(error_message(call["id"], spec.name, MSG_WRITE_WITH_READ))

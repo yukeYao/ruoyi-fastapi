@@ -3,7 +3,7 @@ import json
 
 from fastapi.testclient import TestClient
 
-from app.agent.policy import MSG_NO_PERMISSION
+from app.agent.policy import msg_no_permission
 from app.agent.tools import TOOLS
 from main import app
 from tests.agent_helpers import (
@@ -74,7 +74,7 @@ def test_hard_call_to_unpermitted_tool_is_rejected(scripted_model):
     body = chat(client, headers, "查登录日志")
     result = tool_results(body)[c["id"]]
     assert result["status"] == "error"
-    assert json.loads(result["content"]) == {"ok": False, "error": MSG_NO_PERMISSION}
+    assert json.loads(result["content"]) == {"ok": False, "error": msg_no_permission(TOOLS["search_login_logs"])}
 
 
 def _ids(body):

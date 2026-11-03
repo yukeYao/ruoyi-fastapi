@@ -130,14 +130,16 @@ def _status_preview(user: SysUser, dept_name: str, status: str) -> dict:
     if user.status == status:
         raise ServiceException(msg_same_status(user.user_name, status))
     disable = status == STATUS_DISABLE
+    online = len(online_service.list_session_token_ids(user.user_name, user.user_id))
     return {
         "operation": "停用用户账号" if disable else "启用用户账号",
         "target": _target(user, dept_name),
         "currentState": _STATUS_TEXT.get(user.status, user.status),
         "afterState": _STATUS_TEXT[status],
         "risk": (
-            "停用后该用户无法再登录。已经登录的会话不会自动下线，如需立即下线，请另外提交“强制下线”操作并单独审批。"
-            if disable else "启用后该用户可以重新登录。"
+            f"实际影响：该用户之后无法再登录。该用户当前有 {online} 个在线会话，停用后这些会话不会自动下线；"
+            "如需立即下线，请另外提交“强制下线”操作并单独审批。"
+            if disable else "实际影响：该用户可以重新登录，不会恢复已下线的会话。"
         ),
     }
 
@@ -168,7 +170,7 @@ def _unlock_preview(user: SysUser, dept_name: str) -> dict:
         "target": _target(user, dept_name),
         "currentState": current,
         "afterState": "清除密码错误次数，可立即重新登录",
-        "risk": "如果是他人在暴力破解该账号，解锁后对方可以继续尝试密码，请先确认登录失败来源。",
+        "risk": "实际影响：密码错误计数清零，账号可以立即重新尝试登录。如果是他人在暴力破解该账号，解锁后对方可以继续尝试密码，请先确认登录失败来源。",
     }
 
 
@@ -198,7 +200,8 @@ def preview_force_logout_user(db: Session, scoped_user: dict, args, operator_tok
         "target": _target(user, dept_name),
         "currentState": f"在线会话 {len(sessions)} 个",
         "afterState": "该用户的全部会话下线，需要重新登录",
-        "risk": "只会让现有会话失效，不会停用账号，用户仍可重新登录；如需禁止登录请另外提交“停用账号”操作。",
+        "risk": (f"实际影响：{len(sessions)} 个在线会话立即失效。账号状态保持“{_STATUS_TEXT.get(user.status, user.status)}”，"
+                 "不会停用账号，用户仍可重新登录；如需禁止登录请另外提交“停用账号”操作。"),
     }
 
 

@@ -325,6 +325,8 @@ function createStreamHandler() {
       current.text += data.text
       scrollToBottom()
     } else if (event === 'step') {
+      // settle：新消息之前把已过期的审批收尾，附带该操作的最新状态（以服务端为准刷新卡片）
+      upsertApproval(data.action)
       for (const m of data.messages || []) {
         if (m.type === 'ai') {
           // 节点完成时以完整消息为准，替换掉逐字拼接的文本

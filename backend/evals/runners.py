@@ -57,10 +57,17 @@ def _usage(message) -> tuple[int, int]:
     return usage.get("input_tokens", 0), usage.get("output_tokens", 0)
 
 
+def _record_model_name(trace: dict, message) -> None:
+    """接口实际返回的模型 ID（如带日期的快照版本），写进报告"""
+    name = (getattr(message, "response_metadata", None) or {}).get("model_name")
+    if name and name not in trace["model_names"]:
+        trace["model_names"].append(name)
+
+
 def _new_trace(variant: str, case: dict, run: int) -> dict:
     return {"variant": variant, "case_id": case["id"], "run": run, "reply": "", "replies": [], "tool_calls": [],
             "tool_results": [], "writes": [], "decisions": [], "model_calls": 0, "input_tokens": 0,
-            "output_tokens": 0, "latency": 0.0, "error": ""}
+            "output_tokens": 0, "latency": 0.0, "error": "", "model_names": []}
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +118,7 @@ def run_full(case: dict, headers: dict, run: int) -> dict:
                 # 步数/时间上限时 graph 直接返回固定回复，没有调用模型，不计入步数
                 continue
             if isinstance(m, AIMessage):
+                _record_model_name(trace, m)
                 trace["model_calls"] += 1
                 tin, tout = _usage(m)
                 trace["input_tokens"] += tin
@@ -153,6 +161,7 @@ def _chat_loop(case: dict, run: int, variant: str, model, system: str, execute_t
         reply = ""
         for _ in range(AGENT_MAX_MODEL_STEPS):
             ai = model.invoke(messages)
+            _record_model_name(trace, ai)
             trace["model_calls"] += 1
             tin, tout = _usage(ai)
             trace["input_tokens"] += tin

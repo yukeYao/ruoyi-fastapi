@@ -334,7 +334,7 @@ def test_model_cannot_forge_preview(scripted_model):
     detail = client.get(f"/agent/action/{action['actionId']}", headers=admin).json()["data"]
     for item in (action, detail):
         assert FAKE not in json.dumps(item, ensure_ascii=False)
-        assert item["preview"]["risk"].startswith("停用后该用户无法再登录")
+        assert item["preview"]["risk"].startswith("实际影响：该用户之后无法再登录")
     assert FAKE not in _action_row(action["actionId"])["preview_json"]
 
 

@@ -89,6 +89,32 @@ def test_stream_approval_then_approve(scripted_model):
     assert again.json() == {"code": 500, "msg": agent_service.MSG_ALREADY_DECIDED}
 
 
+def test_stream_shows_expired_settlement(scripted_model):
+    """会话停在已过期的审批上时发新消息：先收尾（过期）产生的消息也要实时推送，并附带 action 的真实状态"""
+    add_user(client, auth_headers(client), "st_t", [])
+    scripted_model(tool_msg(call("change_user_status", {"user_name": "st_t", "status": "1"}, "w1")),
+                   final("该审批已过期"), final("你好"))
+    admin = auth_headers(client)
+    pending = [d for e, d in _events(_stream_chat(admin, "停用 st_t")) if e == "approval"][0]["pendingAction"]
+    db = SessionLocal()
+    db.execute(text("UPDATE agent_action SET expires_at = DATE_SUB(NOW(), INTERVAL 1 MINUTE) WHERE action_id = :i"),
+               {"i": pending["actionId"]})
+    db.commit()
+    db.close()
+
+    events = _events(_stream_chat(admin, "你好", pending["conversationId"]))
+    steps = [d for e, d in events if e == "step"]
+    settle = steps[0]
+    assert settle["node"] == "settle" and settle["action"]["status"] == "EXPIRED"
+    tool = next(m for m in settle["messages"] if m["type"] == "tool")
+    assert json.loads(tool["content"])["status"] == "EXPIRED"
+    assert any(m["type"] == "ai" and m["content"] == "该审批已过期" for m in settle["messages"])
+    # 收尾的消息不会在后续 step 里重复推送；本轮回复正常
+    assert all(m.get("toolCallId") != "w1" for s in steps[1:] for m in s["messages"])
+    assert events[-1][0] == "final" and events[-1][1]["reply"] == "你好"
+    assert _status("st_t") == "0"
+
+
 def test_stream_reject(scripted_model):
     add_user(client, auth_headers(client), "st_t", [])
     scripted_model(tool_msg(call("change_user_status", {"user_name": "st_t", "status": "1"}, "w1")), final("已取消"))

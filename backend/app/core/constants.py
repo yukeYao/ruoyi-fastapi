@@ -104,6 +104,8 @@ AGENT_RATE_LIMIT_MAX_REQUESTS = 20
 AGENT_RECURSION_LIMIT = 25
 AGENT_MAX_MODEL_STEPS = 8
 AGENT_MAX_TOOL_CALLS_PER_STEP = 5
+# 同一轮里连续多少次工具往返没有得到新信息就提前结束（重复相同调用则立即结束），不靠步数上限兜底
+AGENT_MAX_STALL_ROUNDS = 2
 # 单个工具结果（JSON 字符串）的最大字符数，超出截断，避免撑爆上下文
 AGENT_MAX_TOOL_RESULT_CHARS = 4000
 # 工具分页上限：模型传再大的 pageSize 也只给这么多

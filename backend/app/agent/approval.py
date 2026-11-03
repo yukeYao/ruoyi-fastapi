@@ -19,12 +19,12 @@ from langchain_core.messages import AIMessage, ToolMessage
 from app.agent.context import AgentContext
 from app.agent.policy import (
     MSG_INVALID_JSON,
-    MSG_NO_PERMISSION,
     MSG_ONE_WRITE_AT_A_TIME,
     MSG_TOO_MANY_CALLS,
     MSG_UNKNOWN_TOOL,
     error_message,
     is_write_call,
+    msg_no_permission,
     parse_args,
 )
 from app.agent.serialization import strip_forbidden
@@ -73,7 +73,7 @@ def _propose_one(ctx: AgentContext, conversation_id: str, call: dict) -> tuple[T
     try:
         scoped_user = check_perm(ctx.login_user, spec.perm)
     except ServiceException:
-        return error_message(call_id, name, MSG_NO_PERMISSION), None
+        return error_message(call_id, name, msg_no_permission(spec)), None
     args, error = parse_args(spec, call)
     if error:
         return error_message(call_id, name, error), None

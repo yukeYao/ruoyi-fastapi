@@ -264,17 +264,18 @@ def _run_result(db: Session, graph, config: dict, conv_id: str, history_len: int
     }
 
 
-def _settle_waiting_action(db: Session, graph, config: dict, ctx) -> None:
+def _settle_waiting_action(db: Session, graph, config: dict, ctx) -> str | None:
     """
     会话停在审批上时收到新消息：
     - 待审批且未过期：拒绝新消息，必须先批准或拒绝（否则审批悬空时模型会继续操作）；
     - 待审批但已过期：先改成 EXPIRED 并恢复图（execute 回复"已过期"），再处理新消息；
     - 已批准但上次恢复失败：不能在对话里顺带执行写操作，提示回到审批卡片重试；
     - 其他（已拒绝/已过期/已执行/执行中断）：恢复图，execute 只汇报状态、不会执行。
+    返回被收尾的 action_id（没有收尾返回 None）。
     """
     action_id = _waiting_action_id(graph.get_state(config))
     if not action_id:
-        return
+        return None
     action = actions.get_action(db, action_id)
     if action is not None and action.status == ACTION_PENDING:
         if not actions.is_expired(action):
@@ -284,6 +285,7 @@ def _settle_waiting_action(db: Session, graph, config: dict, ctx) -> None:
     if action is not None and action.status == ACTION_APPROVED:
         raise ServiceException(MSG_APPROVED_UNFINISHED)
     _resume(graph, config, ctx, DECISION_EXPIRE)
+    return action_id
 
 
 # ---------------------------------------------------------------------------
@@ -305,6 +307,9 @@ class PreparedRun:
     # 审批运行：被审批的 action，finish 时把它的最新状态一并返回
     action_id: str | None = None
     decision: str | None = None
+    # 对话运行：新消息之前"过期审批收尾"产生的消息和该 action，SSE 开头单独推送（它们不在 graph.stream 里）
+    settled_messages: list | None = None
+    settled_action_id: str | None = None
 
 
 def release_run(run: PreparedRun) -> None:
@@ -335,7 +340,7 @@ def prepare_chat(db: Session, login_user: dict, conversation_id: str | None, mes
         ctx = build_context(login_user, model, client_ip)
         history_len = len((graph.get_state(config).values or {}).get("messages", []))
 
-        _settle_waiting_action(db, graph, config, ctx)
+        settled_action_id = _settle_waiting_action(db, graph, config, ctx)
         settled = (graph.get_state(config).values or {}).get("messages", [])
         inputs = {
             "messages": [*_dangling_tool_responses(settled), HumanMessage(content=message)],
@@ -343,8 +348,13 @@ def prepare_chat(db: Session, login_user: dict, conversation_id: str | None, mes
             "step_count": 0,
             "pending_action_id": None,
             "pending_tool_call_id": None,
+            # 循环保护按"一条用户消息"计数
+            "call_keys": [],
+            "result_hashes": [],
+            "stall_count": 0,
         }
-        return PreparedRun(user_id, lock_token, conv_id, graph, config, ctx, history_len, inputs)
+        return PreparedRun(user_id, lock_token, conv_id, graph, config, ctx, history_len, inputs,
+                           settled_messages=settled[history_len:], settled_action_id=settled_action_id)
     except BaseException:
         release_run_lock(user_id, lock_token)
         raise
@@ -500,6 +510,11 @@ def stream_run(run: PreparedRun) -> Iterator[str]:
     """
     db = SessionLocal()
     try:
+        if run.settled_messages:
+            # 新消息之前的"过期审批收尾"在 prepare 阶段已经完成，这里先把它产生的消息和 action 最新状态推给前端
+            settled_action = actions.get_action(db, run.settled_action_id) if run.settled_action_id else None
+            yield _sse("step", {"node": "settle", "messages": [_message_to_dict(m) for m in run.settled_messages],
+                                "action": actions.action_to_dict(settled_action) if settled_action else None})
         try:
             for mode, chunk in run.graph.stream(run.graph_input, run.config, context=run.ctx, durability="sync",
                                                 stream_mode=["updates", "messages"]):

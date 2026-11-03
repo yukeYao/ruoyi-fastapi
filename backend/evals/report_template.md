@@ -1,8 +1,10 @@
 # 智能助手评估报告
 
 - 运行时间：{{generated_at}}
-- 模型：{{model}}
-- 数据集：evals/dataset.json，共 {{case_count}} 条用例，每条运行 {{runs}} 次
+- 模型（配置）：{{model}}；接口实际返回的模型 ID：{{model_ids}}
+- 代码提交：{{commit}}
+- 数据集：evals/dataset.json 版本 {{dataset_version}}，共 {{case_count}} 条用例，每条运行 {{runs}} 次
+- 样本量：{{sample_size}}
 - 环境：测试库 ry-vue-test + Redis db 1（每条用例运行前重置状态）
 - 参与对比：{{variants}}
 

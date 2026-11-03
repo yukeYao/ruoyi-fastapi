@@ -86,7 +86,8 @@ def test_invalid_json_tool_call_gets_response(scripted_model):
 
 
 def test_too_many_tool_calls_in_one_step(scripted_model):
-    calls = [call("list_roles") for _ in range(AGENT_MAX_TOOL_CALLS_PER_STEP + 2)]
+    # 参数各不相同：完全相同的调用会先被循环保护判为重复（见 test_agent_capability.py），这里只测单步上限
+    calls = [call("list_roles", {"page_num": i + 1}) for i in range(AGENT_MAX_TOOL_CALLS_PER_STEP + 2)]
     body, _ = _admin_chat(scripted_model, tool_msg(*calls), final())
     results = tool_results(body)
     assert len(results) == len(calls)
@@ -95,9 +96,14 @@ def test_too_many_tool_calls_in_one_step(scripted_model):
     assert len(executed) == AGENT_MAX_TOOL_CALLS_PER_STEP and len(blocked) == 2
 
 
-def test_step_limit_stops_endless_tool_loop(scripted_model):
-    # 模型每一步都继续调用工具，永远不收尾
-    looping = [lambda msgs, tools: tool_msg(call("list_roles")) for _ in range(AGENT_MAX_MODEL_STEPS + 5)]
+def test_step_limit_stops_endless_tool_loop(scripted_model, monkeypatch):
+    # 模型每一步都继续调用工具、永远不收尾，且每次都"有进展"（参数不同、结果摘要不同），
+    # 循环保护不会触发：步数上限是最后一道兜底
+    from app.agent import graph as agent_graph
+
+    counter = iter(range(10_000))
+    monkeypatch.setattr(agent_graph, "_digest", lambda text: str(next(counter)))
+    looping = [tool_msg(call("list_roles", {"page_num": i + 1})) for i in range(AGENT_MAX_MODEL_STEPS + 5)]
     body, fake = _admin_chat(scripted_model, *looping)
     assert body["data"]["reply"] == MSG_STEP_LIMIT
     assert len(fake.calls) == AGENT_MAX_MODEL_STEPS

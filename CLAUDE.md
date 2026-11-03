@@ -73,7 +73,8 @@ python -m evals.run_eval --runs 3      # 智能助手评估：调用真实模型
 8. **时限**：运行锁 `AGENT_RUN_LOCK_SECONDS` 必须大于运行时限加一次模型超时；模型客户端 `max_retries=0`。
 9. **日志与异常**：模型异常经 `ModelCallError` 脱敏后再抛出；日志里不能出现 Key、JWT、tokenId。
 10. **前端**：只允许 `views/agent/chat/index.vue` 和 `api/agent/chat.js`；内容一律纯文本渲染（不用 v-html，不渲染 Markdown）。
-11. **测试**：pytest 用 `ScriptedChatModel`（`scripted_model` fixture），不得调用真实模型，也不需要 Key。
+11. **能力边界与循环保护**：缺少的能力由 `policy.capability_boundary` 从工具注册表生成，拼进本次运行的系统上下文，不写进 state；无权限的工具仍不绑定。循环保护（`graph.tools_node` / `propose_node`）只决定"何时停止"，不能用来放宽权限或审批，也不能推断用户意图替换写操作。
+12. **测试**：pytest 用 `ScriptedChatModel`（`scripted_model` fixture），不得调用真实模型，也不需要 Key。
     行为测试检查数据库、Redis、checkpoint 的真实状态，不检查提示词文字。真实模型只在 `evals/` 和手动冒烟中使用，且只连测试库。
 
 ## 工作流程
