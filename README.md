@@ -18,7 +18,8 @@ Java 版对齐，但只实现了核心功能（登录认证 + 系统管理 + 系
 | 密码加密 | bcrypt（兼容若依库里 Spring Security 生成的 `$2a$` 哈希） |
 | 验证码 | Pillow 画图 |
 | 测试 | pytest + FastAPI TestClient |
-| 前端 | RuoYi-Vue3（原样使用，不修改） |
+| 前端 | RuoYi-Vue3（原样使用，不修改；只新增智能助手页面） |
+| 智能助手 | LangGraph StateGraph + langchain-openai（OpenAI 兼容协议），checkpoint 存 SQLite |
 
 ## 目录结构
 
@@ -32,12 +33,14 @@ ruoyi/
     ├── main.py              # 启动入口，监听 8080
     ├── sql/                 # 数据库建表 SQL
     ├── scripts/init_db.py   # 建库 + 导入 SQL（不依赖本机 mysql 命令行）
+    ├── evals/               # 智能助手评估（固定数据集、运行脚本、报告模板，手动运行）
     ├── app/
     │   ├── config.py
     │   ├── core/            # 数据库/Redis连接、统一返回、异常处理、JWT、登录态、数据权限、操作日志装饰器
     │   ├── models/          # SQLAlchemy ORM（对应 Mapper/Domain）
     │   ├── schemas/         # Pydantic 入参模型（camelCase 别名）
     │   ├── services/        # 业务逻辑（对应 ServiceImpl）
+    │   ├── agent/           # 智能助手：工具、权限策略、审批、LangGraph 图
     │   └── routers/         # 路由（对应 Controller）
     │       ├── auth.py          # 登录认证
     │       ├── system/          # 用户/角色/菜单/部门/岗位/字典/参数
@@ -86,7 +89,9 @@ python -m venv .venv
 .venv\Scripts\python.exe scripts\init_db.py
 ```
 
-会自动创建 `ry-vue` 数据库（utf8mb4）并导入 `sql/ry_20260417.sql`。也可以用 Navicat 手动导入这份 SQL。
+会自动创建 `ry-vue` 数据库（utf8mb4），导入 `sql/ry_20260417.sql` 和智能助手的 `sql/agent.sql`，
+并删除旧的智能助手会话文件（`data/agent_checkpoints.sqlite*`）。**会覆盖开发数据**；
+已有开发数据、只想加上智能助手时，单独导入 `sql/agent.sql` 即可。也可以用 Navicat 手动导入这些 SQL。
 
 ### 4. 启动后端
 
@@ -129,6 +134,35 @@ cd backend
 测试连接独立的 `ry-vue-test` 库和 Redis db 1，不会污染开发数据（每次运行会重建测试库表结构）。
 
 除了按开发阶段划分的 `test_stage*.py`，下面「开发中遇到的问题与解决」里的每个问题都有对应的回归测试文件。
+
+## 智能助手（Agent）
+
+左侧菜单「智能助手」（需要 `agent:chat:use` 权限，`agent.sql` 默认授予 admin 和普通角色）。可以用自然语言：
+
+- 查询：用户、角色、部门、登录日志、登录失败统计、账号锁定状态、操作日志摘要、在线会话；
+- 操作：启用/停用账号、解锁账号、强制下线。**写操作只会生成审批卡片**，点击「批准」后服务端才执行。
+
+所有权限、数据范围、目标解析和审批都在服务端完成，不依赖模型遵守提示词。设计说明、关键取舍、失败案例和面试问答见
+[docs/agent-design.md](docs/agent-design.md)，评估结果见 [docs/agent-eval-report.md](docs/agent-eval-report.md)。
+
+配置（`backend/.env`，不要提交 Key）：
+
+```
+AGENT_MODEL=gpt-4o-mini
+AGENT_API_KEY=sk-...
+AGENT_BASE_URL=https://api.openai.com/v1   # 可选，OpenAI 兼容服务的地址
+```
+
+未配置模型时，智能助手接口返回"未配置模型"，其他功能不受影响。pytest 用脚本化的假模型，不需要 Key、不调用真实模型。
+
+评估（会调用真实模型，手动运行）：
+
+```powershell
+cd backend
+.venv\Scripts\python.exe -m evals.run_eval --runs 3
+```
+
+说明见 [backend/evals/README.md](backend/evals/README.md)。
 
 ## 未实现的功能
 
