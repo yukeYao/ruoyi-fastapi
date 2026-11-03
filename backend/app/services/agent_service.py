@@ -9,11 +9,15 @@
 - 频率限制用 Lua 把 INCR 和"首次设置过期时间"放在一个原子操作里：
   本机 Redis 5 不支持 EXPIRE NX，分两条命令执行的话，中间崩溃会留下永不过期的计数。
 """
+import json
 import logging
 import uuid
+from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import datetime
+from typing import Any
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage, HumanMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 from sqlalchemy.orm import Session
@@ -39,6 +43,7 @@ from app.core.constants import (
     DECISION_EXPIRE,
     DECISION_REJECT,
 )
+from app.core.database import SessionLocal
 from app.core.exceptions import ServiceException
 from app.core.redis_client import redis_client
 from app.models.agent_conversation import AgentConversation
@@ -258,10 +263,33 @@ def _settle_waiting_action(db: Session, graph, config: dict, ctx) -> None:
 
 
 # ---------------------------------------------------------------------------
-# 对话
+# 一次运行 = 预检与加锁（prepare）-> 执行图（普通请求 invoke / SSE stream）-> 整理结果（finish）-> 释放锁
+# 拆开是为了让普通接口和 SSE 接口共用同一套校验：SSE 在开始推流之前完成全部预检，
+# 未登录、无权限、会话不存在、正忙等错误仍按 HTTP 200 + JSON 的 code/msg 返回，前端统一处理。
 # ---------------------------------------------------------------------------
 
-def chat(db: Session, login_user: dict, conversation_id: str | None, message: str, model, client_ip: str = "") -> dict:
+@dataclass
+class PreparedRun:
+    user_id: int
+    lock_token: str
+    conversation_id: str
+    graph: Any
+    config: dict
+    ctx: Any
+    history_len: int
+    graph_input: Any
+    # 审批运行：被审批的 action，finish 时把它的最新状态一并返回
+    action_id: str | None = None
+    decision: str | None = None
+
+
+def release_run(run: PreparedRun) -> None:
+    # Lua 比较锁的值再删除，重复调用无害（SSE 的生成器和兜底的后台任务都会调用）
+    release_run_lock(run.user_id, run.lock_token)
+
+
+def prepare_chat(db: Session, login_user: dict, conversation_id: str | None, message: str, model,
+                 client_ip: str = "") -> PreparedRun:
     message = (message or "").strip()
     if not message:
         raise ServiceException("消息不能为空")
@@ -285,7 +313,6 @@ def chat(db: Session, login_user: dict, conversation_id: str | None, message: st
 
         _settle_waiting_action(db, graph, config, ctx)
         settled = (graph.get_state(config).values or {}).get("messages", [])
-
         inputs = {
             "messages": [*_dangling_tool_responses(settled), HumanMessage(content=message)],
             "conversation_id": conv_id,
@@ -293,31 +320,19 @@ def chat(db: Session, login_user: dict, conversation_id: str | None, message: st
             "pending_action_id": None,
             "pending_tool_call_id": None,
         }
-        _invoke(graph, inputs, config, ctx)
-
-        conv.update_time = datetime.now()
-        db.commit()
-        return _run_result(db, graph, config, conv_id, history_len)
-    finally:
-        # 无论成功、业务异常还是意外异常都要释放，否则用户要等锁过期（几分钟）才能再用
+        return PreparedRun(user_id, lock_token, conv_id, graph, config, ctx, history_len, inputs)
+    except BaseException:
         release_run_lock(user_id, lock_token)
+        raise
 
 
-# ---------------------------------------------------------------------------
-# 审批
-# ---------------------------------------------------------------------------
-
-def get_action_detail(db: Session, login_user: dict, action_id: str) -> dict:
-    """只读：过期的 PENDING 在返回里标记 expired=true，真正改状态留给审批/对话接口（持锁时）做"""
-    return actions.action_to_dict(actions.get_owned_action(db, login_user, action_id))
-
-
-def decide(db: Session, login_user: dict, action_id: str, decision: str, model, client_ip: str = "") -> dict:
+def prepare_decide(db: Session, login_user: dict, action_id: str, decision: str, model,
+                   client_ip: str = "") -> PreparedRun:
     """
-    批准或拒绝一个 action。只接受 action_id 和决定：参数、预览都以数据库为准，不能修改。
+    批准或拒绝的预检。只接受 action_id 和决定：参数、预览都以数据库为准，不能修改。
 
     流程：校验归属 -> 拿运行锁 -> 条件 UPDATE 完成 PENDING -> APPROVED/REJECTED/EXPIRED
-    -> 图确实停在这个 action 上时 Command(resume=...) 恢复（execute 节点负责 APPROVED -> EXECUTING）。
+    -> 图确实停在这个 action 上时才允许恢复（execute 节点负责 APPROVED -> EXECUTING）。
     - 重复请求：状态已经变化且图不再等待，直接提示"已处理"，不会再次执行；
     - 已批准但上次 resume 失败（图仍停在审批上）：同一用户再次批准会继续恢复，
       execute 用条件 UPDATE 抢执行权，最多执行一次；
@@ -353,12 +368,101 @@ def decide(db: Session, login_user: dict, action_id: str, decision: str, model, 
         if not waiting:
             # 图已经不在等这个 action：之前的请求已经处理完，重复点击不做任何事
             raise ServiceException(MSG_ALREADY_DECIDED)
-
-        _resume(graph, config, ctx, decision)
-        conv.update_time = datetime.now()
-        db.commit()
-        result = _run_result(db, graph, config, conv.conversation_id, history_len)
-        result["action"] = actions.action_to_dict(actions.get_action(db, action_id))
-        return result
-    finally:
+        # resume 的值只是给图看的提示；execute 节点只认数据库里的 action 状态
+        return PreparedRun(user_id, lock_token, conv.conversation_id, graph, config, ctx, history_len,
+                           Command(resume=decision), action_id=action_id, decision=decision)
+    except BaseException:
         release_run_lock(user_id, lock_token)
+        raise
+
+
+def finish_run(db: Session, run: PreparedRun) -> dict:
+    """整理返回：状态一律取自 checkpoint 和 agent_action，不解析模型回复"""
+    db.query(AgentConversation).filter(AgentConversation.conversation_id == run.conversation_id).update(
+        {AgentConversation.update_time: datetime.now()}, synchronize_session=False
+    )
+    db.commit()
+    result = _run_result(db, run.graph, run.config, run.conversation_id, run.history_len)
+    if run.action_id:
+        result["action"] = actions.action_to_dict(actions.get_action(db, run.action_id))
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 普通请求
+# ---------------------------------------------------------------------------
+
+def chat(db: Session, login_user: dict, conversation_id: str | None, message: str, model, client_ip: str = "") -> dict:
+    run = prepare_chat(db, login_user, conversation_id, message, model, client_ip)
+    try:
+        _invoke(run.graph, run.graph_input, run.config, run.ctx)
+        return finish_run(db, run)
+    finally:
+        # 无论成功、业务异常还是意外异常都要释放，否则用户要等锁过期（几分钟）才能再用
+        release_run(run)
+
+
+def get_action_detail(db: Session, login_user: dict, action_id: str) -> dict:
+    """只读：过期的 PENDING 在返回里标记 expired=true，真正改状态留给审批/对话接口（持锁时）做"""
+    return actions.action_to_dict(actions.get_owned_action(db, login_user, action_id))
+
+
+def decide(db: Session, login_user: dict, action_id: str, decision: str, model, client_ip: str = "") -> dict:
+    run = prepare_decide(db, login_user, action_id, decision, model, client_ip)
+    try:
+        _resume(run.graph, run.config, run.ctx, decision)
+        return finish_run(db, run)
+    finally:
+        release_run(run)
+
+
+# ---------------------------------------------------------------------------
+# SSE
+# ---------------------------------------------------------------------------
+
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+
+
+def stream_run(run: PreparedRun) -> Iterator[str]:
+    """
+    以 SSE 推送一次运行的过程。同步生成器：Starlette 在线程池里迭代，图和 service 保持同步写法。
+    事件：
+    - step：某个节点完成，附带这一步新增的消息（工具调用、工具结果），用于展示工具步骤；
+    - token：模型输出的文本片段（只取 agent 节点、只取文本，不含工具调用参数）；
+    - approval：图停在审批上，附带服务端生成的 pendingAction（预览来自数据库，不是模型输出）；
+    - final：运行结束，内容与普通接口的返回一致（状态取自 agent_action）；
+    - error：运行中出错，{code, msg}。开始推流之前的错误不走这里，仍是 HTTP 200 + JSON。
+    推流开始后客户端断开时生成器被关闭，finally 里释放运行锁。
+    """
+    db = SessionLocal()
+    try:
+        try:
+            for mode, chunk in run.graph.stream(run.graph_input, run.config, context=run.ctx, durability="sync",
+                                                stream_mode=["updates", "messages"]):
+                if mode == "messages":
+                    message, metadata = chunk
+                    if (metadata.get("langgraph_node") == "agent" and isinstance(message, AIMessageChunk)
+                            and isinstance(message.content, str) and message.content):
+                        yield _sse("token", {"text": message.content})
+                    continue
+                for node, update in chunk.items():
+                    if node == "__interrupt__":
+                        yield _sse("approval", {"pendingAction": _pending_action_dict(db, run.graph.get_state(run.config))})
+                    else:
+                        messages = update.get("messages", []) if isinstance(update, dict) else []
+                        yield _sse("step", {"node": node, "messages": [_message_to_dict(m) for m in messages]})
+        except GraphRecursionError:
+            yield _sse("error", {"code": 500, "msg": "处理步数超过上限，请缩小问题范围后重试"})
+            return
+        except ServiceException as exc:
+            yield _sse("error", {"code": exc.code, "msg": exc.message})
+            return
+        except Exception:
+            logger.exception("智能助手运行失败（SSE）：thread=%s", run.conversation_id)
+            yield _sse("error", {"code": 500, "msg": MSG_FAILED})
+            return
+        yield _sse("final", finish_run(db, run))
+    finally:
+        release_run(run)
+        db.close()

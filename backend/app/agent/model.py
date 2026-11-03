@@ -6,13 +6,14 @@
 - ScriptedChatModel：自动化测试和 CI 用，不需要 API Key。官方的 GenericFakeChatModel 没有实现
   bind_tools（阶段 0 实测会抛 NotImplementedError），无法验证"模型看到了哪些工具"，所以自己实现。
 """
-from collections.abc import Callable, Sequence
+import json
+from collections.abc import Callable, Iterator, Sequence
 from typing import Any
 
 from langchain_core.callbacks import CallbackManagerForLLMRun
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages import AIMessage, AIMessageChunk, BaseMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import Field
 
@@ -52,13 +53,42 @@ class ScriptedChatModel(BaseChatModel):
         run_manager: CallbackManagerForLLMRun | None = None,
         **kwargs: Any,
     ) -> ChatResult:
+        return ChatResult(generations=[ChatGeneration(message=self._next(messages))])
+
+    def _next(self, messages: list[BaseMessage]) -> AIMessage:
         self.calls.append(list(messages))
         if self.script:
             item = self.script.pop(0)
-            message = item(messages, list(self.bound_tool_names)) if callable(item) else item
-        else:
-            message = AIMessage(content="（脚本已结束）")
-        return ChatResult(generations=[ChatGeneration(message=message)])
+            return item(messages, list(self.bound_tool_names)) if callable(item) else item
+        return AIMessage(content="（脚本已结束）")
+
+    def _stream(
+        self,
+        messages: list[BaseMessage],
+        stop: list[str] | None = None,
+        run_manager: CallbackManagerForLLMRun | None = None,
+        **kwargs: Any,
+    ) -> Iterator[ChatGenerationChunk]:
+        """
+        流式输出（SSE 接口用）：文本按两半拆成两个片段，工具调用作为 tool_call_chunks 一次给出，
+        和真实 OpenAI 流式返回的形态一致，便于测试 token 事件和流式下的工具调用。
+        """
+        message = self._next(messages)
+        text = message.content if isinstance(message.content, str) else ""
+        half = len(text) // 2
+        pieces = [p for p in (text[:half], text[half:]) if p] or [""]
+        for i, piece in enumerate(pieces):
+            last = i == len(pieces) - 1
+            tool_chunks = []
+            if last:
+                tool_chunks = [{"name": c["name"], "args": json.dumps(c["args"], ensure_ascii=False), "id": c["id"], "index": n}
+                               for n, c in enumerate(message.tool_calls)]
+                tool_chunks += [{"name": c.get("name"), "args": c.get("args"), "id": c.get("id"), "index": len(tool_chunks) + n}
+                                for n, c in enumerate(message.invalid_tool_calls)]
+            chunk = ChatGenerationChunk(message=AIMessageChunk(content=piece, tool_call_chunks=tool_chunks))
+            if run_manager and piece:
+                run_manager.on_llm_new_token(piece, chunk=chunk)
+            yield chunk
 
 
 def is_model_configured() -> bool:
