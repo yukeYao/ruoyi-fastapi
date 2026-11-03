@@ -102,7 +102,7 @@
               </div>
 
               <!-- 错误提示 -->
-              <el-alert v-else-if="item.kind === 'error'" :title="item.text" type="error" show-icon :closable="false" class="error-alert" />
+              <el-alert v-else-if="item.kind === 'error'" :title="item.text" :type="item.type" show-icon :closable="false" class="error-alert" />
             </div>
           </el-scrollbar>
 
@@ -203,9 +203,13 @@ function push(item) {
   return items.value[items.value.length - 1]
 }
 
-function pushError(text) {
-  push({ kind: 'error', text: text || '操作失败' })
+// type 为 warning 时表示"操作本身已有结果（以审批卡片为准），只是回复没生成"
+function pushError(text, type) {
+  push({ kind: 'error', text: text || '操作失败', type: type || 'error' })
 }
+
+// 审批运行出错时服务端附带的 action：已到终态说明写操作已经处理完，只是模型回复失败
+const SETTLED = ['SUCCEEDED', 'FAILED', 'REJECTED', 'EXPIRED', 'EXECUTING']
 
 // 审批结果的可信字段（status）由服务端生成，可以作为步骤状态显示
 const OUTCOME_TEXT = {
@@ -354,7 +358,10 @@ function createStreamHandler() {
         current.streaming = false
         current = null
       }
-      pushError(data.msg)
+      // 错误文案和卡片状态都以服务端 agent_action 为准：执行成功后模型总结失败时，
+      // 卡片显示"已执行成功"，提示"操作已执行成功，但回复生成失败"，不会出现重试按钮
+      upsertApproval(data.action)
+      pushError(data.msg, data.action && SETTLED.includes(data.action.status) ? 'warning' : 'error')
     }
   }
 }
@@ -413,6 +420,10 @@ async function decide(card, decision) {
       const res = await (decision === 'approve' ? approveAction : rejectAction)(card.action.actionId)
       appendMessages(res.data.messages)
       applyResult(res.data)
+      if (res.data.replyError) {
+        // 操作已到终态（状态见卡片），只是之后的模型回复生成失败
+        pushError(res.data.replyError, 'warning')
+      }
     }
   } catch (e) {
     pushError(e && e.message ? e.message : String(e))

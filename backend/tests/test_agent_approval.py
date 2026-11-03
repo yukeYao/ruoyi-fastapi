@@ -528,7 +528,10 @@ def test_model_failure_after_execute_does_not_reexecute(scripted_model):
         raise RuntimeError("模型超时")
 
     _, action = _propose_disable(scripted_model, admin, target, boom, final("继续"))
-    assert _approve(admin, action["actionId"])["msg"] == agent_service.MSG_FAILED
+    # 写操作已成功、只是模型总结失败：返回真实状态，不能说成"处理失败"（详见 test_agent_reply_failure.py）
+    body = _approve(admin, action["actionId"])
+    assert body["data"]["action"]["status"] == "SUCCEEDED"
+    assert body["data"]["replyError"] == agent_service.MSG_REPLY_FAILED["SUCCEEDED"]
     assert _action_row(action["actionId"])["status"] == "SUCCEEDED"
     # execute 的 checkpoint 已同步写入：再次批准只提示已处理，不会重复执行
     assert _approve(admin, action["actionId"])["msg"] == agent_service.MSG_ALREADY_DECIDED

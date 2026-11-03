@@ -27,9 +27,12 @@ from app.agent.graph import get_graph
 from app.agent.serialization import tool_error
 from app.core.constants import (
     ACTION_APPROVED,
+    ACTION_EXECUTING,
     ACTION_EXPIRED,
+    ACTION_FAILED,
     ACTION_PENDING,
     ACTION_REJECTED,
+    ACTION_SUCCEEDED,
     AGENT_MAX_INPUT_CHARS,
     AGENT_RATE_LIMIT_KEY_PREFIX,
     AGENT_RATE_LIMIT_MAX_REQUESTS,
@@ -60,6 +63,16 @@ MSG_HAS_PENDING = "当前会话有待审批的操作，请先批准或拒绝"
 MSG_APPROVED_UNFINISHED = "当前会话有已批准但尚未完成的操作，请在审批卡片中重试"
 MSG_ALREADY_DECIDED = "该操作已处理"
 MSG_ALREADY_APPROVED = "该操作已批准，不能再拒绝"
+# 审批恢复后，操作已到终态、只是后续模型总结失败：提示以 agent_action 的真实状态为准，
+# 不能笼统地说"处理失败，请稍后重试"，否则用户会以为没执行而重复操作。
+# APPROVED/PENDING 不在表里：说明 execute 还没跑完，保持"处理失败"，审批卡片允许重试
+MSG_REPLY_FAILED = {
+    ACTION_SUCCEEDED: "操作已执行成功，但回复生成失败",
+    ACTION_FAILED: "操作执行失败，且回复生成失败，失败原因见审批卡片",
+    ACTION_REJECTED: "操作已拒绝，未执行，但回复生成失败",
+    ACTION_EXPIRED: "操作已过期，未执行，但回复生成失败",
+    ACTION_EXECUTING: "操作执行结果未知，需人工确认，且回复生成失败",
+}
 
 _RATE_LIMIT_LUA = redis_client.register_script(
     """
@@ -171,10 +184,21 @@ def _thread_config(conversation_id: str) -> dict:
 
 
 def _waiting_action_id(snapshot) -> str | None:
-    """图是否停在审批的 interrupt 上；是的话返回等待中的 action_id"""
-    if "approval" in (snapshot.next or ()):
+    """
+    图是否还在等某个 action 完成；是的话返回它的 action_id。两种情况：
+    - 停在审批的 interrupt 上（approval）；
+    - approval 已恢复，但 execute 节点在抢到执行权之前就出错（如数据库连接中断），图停在 execute 上。
+      这时 action 仍是 APPROVED，必须仍算"在等"：否则重试批准会被当成"已处理"，
+      action 永远停在 APPROVED；对话接口也不会提示回到审批卡片，新消息会把这个未完成的执行直接丢掉。
+    """
+    if {"approval", "execute"} & set(snapshot.next or ()):
         return (snapshot.values or {}).get("pending_action_id")
     return None
+
+
+def _resume_input(snapshot, decision: str):
+    # 停在 interrupt 上用 Command(resume) 恢复；停在出错的 execute 上传 None，让 LangGraph 重跑该节点
+    return Command(resume=decision) if "approval" in (snapshot.next or ()) else None
 
 
 def _pending_action_dict(db: Session, snapshot) -> dict | None:
@@ -224,7 +248,7 @@ def _invoke(graph, graph_input, config: dict, ctx) -> None:
 
 def _resume(graph, config: dict, ctx, decision: str) -> None:
     # resume 的值只是给图看的提示；execute 节点只认数据库里的 action 状态
-    _invoke(graph, Command(resume=decision), config, ctx)
+    _invoke(graph, _resume_input(graph.get_state(config), decision), config, ctx)
 
 
 def _run_result(db: Session, graph, config: dict, conv_id: str, history_len: int) -> dict:
@@ -370,7 +394,7 @@ def prepare_decide(db: Session, login_user: dict, action_id: str, decision: str,
             raise ServiceException(MSG_ALREADY_DECIDED)
         # resume 的值只是给图看的提示；execute 节点只认数据库里的 action 状态
         return PreparedRun(user_id, lock_token, conv.conversation_id, graph, config, ctx, history_len,
-                           Command(resume=decision), action_id=action_id, decision=decision)
+                           _resume_input(snapshot, decision), action_id=action_id, decision=decision)
     except BaseException:
         release_run_lock(user_id, lock_token)
         raise
@@ -407,10 +431,35 @@ def get_action_detail(db: Session, login_user: dict, action_id: str) -> dict:
     return actions.action_to_dict(actions.get_owned_action(db, login_user, action_id))
 
 
+def _fresh_action(db: Session, action_id: str):
+    # execute 节点用自己的 Session 改状态；先结束当前事务，避免 REPEATABLE READ 读到执行前的快照
+    db.commit()
+    return actions.get_action(db, action_id)
+
+
+def _reply_failed_message(db: Session, run: PreparedRun) -> str | None:
+    """审批运行出错时，被审批的操作若已到终态，返回"操作已xx，但回复生成失败"的说明；否则 None"""
+    if not run.action_id:
+        return None
+    action = _fresh_action(db, run.action_id)
+    return MSG_REPLY_FAILED.get(action.status) if action else None
+
+
 def decide(db: Session, login_user: dict, action_id: str, decision: str, model, client_ip: str = "") -> dict:
     run = prepare_decide(db, login_user, action_id, decision, model, client_ip)
     try:
-        _resume(run.graph, run.config, run.ctx, decision)
+        try:
+            _resume(run.graph, run.config, run.ctx, decision)
+        except ServiceException:
+            # 操作已到终态、只是之后的模型总结失败：不能返回成"处理失败"（前端会以为没执行而重试）。
+            # 照常返回本次结果，action 是真实状态，replyError 说明回复没生成。
+            # 这里不能用 code 500：request.js 遇到非 200 只抛出 msg，页面拿不到 action
+            reply_error = _reply_failed_message(db, run)
+            if reply_error is None:
+                raise
+            result = finish_run(db, run)
+            result["replyError"] = reply_error
+            return result
         return finish_run(db, run)
     finally:
         release_run(run)
@@ -422,6 +471,20 @@ def decide(db: Session, login_user: dict, action_id: str, decision: str, model, 
 
 def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
+
+
+def _error_event(db: Session, run: PreparedRun, code: int, msg: str) -> str:
+    """
+    推流中出错。审批运行附带 action 的真实状态：execute 已经跑完（成功、失败、拒绝、过期）时，
+    文案改为"操作已xx，但回复生成失败"，前端据此显示最终状态，不会提示用户重新批准。
+    """
+    data = {"code": code, "msg": msg}
+    if run.action_id:
+        action = _fresh_action(db, run.action_id)
+        if action is not None:
+            data["msg"] = MSG_REPLY_FAILED.get(action.status, msg)
+            data["action"] = actions.action_to_dict(action)
+    return _sse("error", data)
 
 
 def stream_run(run: PreparedRun) -> Iterator[str]:
@@ -453,14 +516,14 @@ def stream_run(run: PreparedRun) -> Iterator[str]:
                         messages = update.get("messages", []) if isinstance(update, dict) else []
                         yield _sse("step", {"node": node, "messages": [_message_to_dict(m) for m in messages]})
         except GraphRecursionError:
-            yield _sse("error", {"code": 500, "msg": "处理步数超过上限，请缩小问题范围后重试"})
+            yield _error_event(db, run, 500, "处理步数超过上限，请缩小问题范围后重试")
             return
         except ServiceException as exc:
-            yield _sse("error", {"code": exc.code, "msg": exc.message})
+            yield _error_event(db, run, exc.code, exc.message)
             return
         except Exception:
             logger.exception("智能助手运行失败（SSE）：thread=%s", run.conversation_id)
-            yield _sse("error", {"code": 500, "msg": MSG_FAILED})
+            yield _error_event(db, run, 500, MSG_FAILED)
             return
         yield _sse("final", finish_run(db, run))
     finally:

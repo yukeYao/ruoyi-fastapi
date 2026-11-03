@@ -25,6 +25,20 @@ MSG_STEP_LIMIT = "本次问题的处理步数已达上限，请缩小问题范�
 MSG_TIME_LIMIT = "本次处理时间已达上限，请稍后继续提问。"
 
 
+class ModelCallError(RuntimeError):
+    """
+    模型调用失败的脱敏异常。第三方 SDK 的异常信息可能带有部分 Key、请求头、上游返回的原文，
+    而 LangGraph 会把节点异常的 repr 写进 checkpoint，logger.exception 也会打印异常链，
+    所以只保留异常类型和 HTTP 状态码，并用 from None 切断原异常链。
+    """
+
+
+def _describe_model_error(exc: Exception) -> str:
+    status_code = getattr(exc, "status_code", None)
+    suffix = f"（HTTP {int(status_code)}）" if isinstance(status_code, int) else ""
+    return f"模型调用失败：{type(exc).__name__}{suffix}"
+
+
 def agent_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
     ctx = runtime.context
     step_count = state.get("step_count", 0)
@@ -39,7 +53,10 @@ def agent_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
     model = ctx.model.bind_tools(schemas) if schemas else ctx.model
     # 系统提示词每次拼在最前面，不写进 state：避免 checkpoint 里存多份，也方便以后修改提示词
     prompt = [SystemMessage(content=policy.SYSTEM_PROMPT), *policy.trim_history(state["messages"])]
-    response = model.invoke(prompt)
+    try:
+        response = model.invoke(prompt)
+    except Exception as exc:
+        raise ModelCallError(_describe_model_error(exc)) from None
     return {"messages": [response], "step_count": step_count + 1}
 
 
