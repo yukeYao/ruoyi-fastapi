@@ -38,7 +38,7 @@ def _admin_chat(scripted_model, *script):
 
 
 def test_mixed_read_and_write_only_runs_read(scripted_model):
-    read, write = call("search_users", {"user_name": "ry"}), call("change_user_status", {"user_id": 2, "status": "1"})
+    read, write = call("search_users", {"user_name": "ry"}), call("change_user_status", {"user_name": "ry", "status": "1"})
     body, _ = _admin_chat(scripted_model, tool_msg(read, write), final())
     results = tool_results(body)
     assert set(results) == {read["id"], write["id"]}  # 每个 tool_call 都有 ToolMessage

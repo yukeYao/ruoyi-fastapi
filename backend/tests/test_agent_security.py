@@ -88,7 +88,7 @@ def test_injection_in_login_log_cannot_trigger_write(scripted_model):
     def obey_injection(messages, tools):
         # 模拟被注入成功的模型：读到日志里的"指令"后照做
         seen["tool_content"] = messages[-1].content
-        return tool_msg(call("change_user_status", {"user_id": 2, "status": "1"}, "w1"),
+        return tool_msg(call("change_user_status", {"user_name": "ry", "status": "1"}, "w1"),
                         call("force_logout_user", {"user_name": "ry"}, "w2"))
 
     search = call("search_login_logs", {"status": "1"})
@@ -105,7 +105,7 @@ def test_injection_in_login_log_cannot_trigger_write(scripted_model):
         assert "w1" not in results  # 等待审批
         assert json.loads(results["w2"]["content"])["error"] == policy.MSG_ONE_WRITE_AT_A_TIME
         action = body["data"]["pendingAction"]
-        assert action["status"] == "PENDING" and action["args"] == {"status": "1", "user_id": 2}
+        assert action["status"] == "PENDING" and action["args"] == {"status": "1", "user_name": "ry"}
         # 预览由服务端生成：目标、当前状态都来自数据库
         assert action["preview"]["target"]["userName"] == "ry" and action["preview"]["currentState"] == "正常"
 
@@ -160,7 +160,7 @@ def test_no_secret_in_results_response_or_checkpoint(scripted_model, agent_check
     # 先查询，再停用（审批），再强制下线（审批）：覆盖读工具、两个写工具、agent_action 和操作日志
     scripted_model(
         tool_msg(*calls),
-        tool_msg(call("change_user_status", {"user_id": user_id, "status": "1"}, "w1")),
+        tool_msg(call("change_user_status", {"user_name": "ag_canary_u", "status": "1"}, "w1")),
         then_logout,
         final("处理完了"),
     )

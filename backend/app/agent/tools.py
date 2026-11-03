@@ -53,10 +53,11 @@ class ToolSpec:
     output_fields: tuple[str, ...] = ()
     # 需要脱敏的字段：{字段名: MASK_PHONE / MASK_EMAIL}
     masks: dict[str, str] = field(default_factory=dict)
-    # 写工具：(db, 已带权限上下文的 login_user, 已校验的参数, 操作者自己的会话 token) -> dict
-    # preview 只读、生成审批预览；execute 重新校验后调用现有 service
+    # 写工具：preview(db, 已带权限上下文的 login_user, 已校验的参数, 操作者会话 token) -> 预览 dict，
+    # 只读，预览里的 target.userId / userName 由 propose 冻结；
+    # execute(..., 冻结的目标 {userId, userName}) -> 结果 dict，只按冻结的目标操作
     preview: Callable[[Session, dict, Any, str | None], dict] | None = None
-    execute: Callable[[Session, dict, Any, str | None], dict] | None = None
+    execute: Callable[[Session, dict, Any, str | None, dict], dict] | None = None
     # 写入 sys_oper_log 的模块标题和业务类型，与对应的现有路由 @log 保持一致
     oper_title: str = ""
     business_type: int = BIZ_OTHER
@@ -179,8 +180,16 @@ def _list_online_sessions(db: Session, login_user: dict, args: ListOnlineArgs) -
 # 写工具：模型调用后只生成 PENDING 审批（预览见 write_tools.py），用户批准后服务端才执行
 # ---------------------------------------------------------------------------
 
-class ChangeUserStatusArgs(ToolArgs):
-    user_id: int = Field(ge=1, description="用户ID")
+class TargetUserArgs(ToolArgs):
+    """
+    写工具的目标只接受用户名（登录账号），不接受 user_id：由服务端精确解析成唯一用户并冻结，
+    模型猜错 ID 就可能操作到别人（冒烟测试里真实模型就猜过 user_id=1）。
+    extra="forbid" 保证模型无法额外提交 user_id / target_user_id。
+    """
+    user_name: str = Field(min_length=1, max_length=30, description="目标用户的登录账号（精确匹配）；只知道姓名或条件时先用 search_users 查询")
+
+
+class ChangeUserStatusArgs(TargetUserArgs):
     status: Literal["0", "1"] = Field(description="0 启用，1 停用")
 
 
@@ -214,16 +223,16 @@ _TOOL_LIST = [
     # 不返回 tokenId：拿到它就能强制下线任意会话；强制下线工具改为按用户名在服务端解析会话
     ToolSpec("list_online_sessions", "查询在线会话", RISK_READ, "monitor:online:list", ListOnlineArgs, _list_online_sessions,
              ("userName", "deptName", "ipaddr", "loginLocation", "browser", "os", "loginTime")),
-    ToolSpec("change_user_status", "启用或停用用户账号。只会提交审批，用户批准后才执行；停用不会让已登录会话下线",
+    ToolSpec("change_user_status", "按登录账号启用或停用用户。只会提交审批，用户批准后才执行；停用不会让已登录会话下线",
              RISK_WRITE, "system:user:edit", ChangeUserStatusArgs,
              preview=write_tools.preview_change_user_status, execute=write_tools.execute_change_user_status,
              oper_title="用户管理", business_type=BIZ_UPDATE),
-    ToolSpec("unlock_user_account", "清除账号的密码错误次数（解除锁定）。只会提交审批，用户批准后才执行",
-             RISK_WRITE, "monitor:logininfor:unlock", UserNameArgs,
+    ToolSpec("unlock_user_account", "按登录账号清除密码错误次数（解除锁定）。只会提交审批，用户批准后才执行",
+             RISK_WRITE, "monitor:logininfor:unlock", TargetUserArgs,
              preview=write_tools.preview_unlock_user_account, execute=write_tools.execute_unlock_user_account,
              oper_title="账户解锁", business_type=BIZ_OTHER),
-    ToolSpec("force_logout_user", "强制下线该用户的全部在线会话。只会提交审批，用户批准后才执行；不会停用账号",
-             RISK_WRITE, "monitor:online:forceLogout", UserNameArgs,
+    ToolSpec("force_logout_user", "按登录账号强制下线该用户的全部在线会话。只会提交审批，用户批准后才执行；不会停用账号",
+             RISK_WRITE, "monitor:online:forceLogout", TargetUserArgs,
              preview=write_tools.preview_force_logout_user, execute=write_tools.execute_force_logout_user,
              oper_title="在线用户", business_type=BIZ_FORCE),
 ]

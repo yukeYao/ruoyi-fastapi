@@ -16,6 +16,8 @@ class AgentAction(Base):
     tool_call_id: Mapped[str] = mapped_column(String(128))
     tool_name: Mapped[str] = mapped_column(String(64))
     args_json: Mapped[str] = mapped_column(String(2000))
+    # 服务端在预览阶段解析出的目标用户 {userId, userName}；模型无法提供或修改，执行时只认它
+    target_json: Mapped[str] = mapped_column(String(500))
     args_hash: Mapped[str] = mapped_column(String(64))
     preview_json: Mapped[str | None] = mapped_column(Text)
     perm: Mapped[str] = mapped_column(String(100))

@@ -26,8 +26,10 @@ def canonical_json(data: dict) -> str:
     return json.dumps(data, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def hash_args(args_json: str) -> str:
-    return hashlib.sha256(args_json.encode("utf-8")).hexdigest()
+def hash_action(args_json: str, target_json: str) -> str:
+    """参数和冻结目标一起哈希：任何一个在数据库里被改动，执行前都能发现"""
+    payload = canonical_json({"args": json.loads(args_json), "target": json.loads(target_json)})
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def create_action_once(
@@ -37,6 +39,7 @@ def create_action_once(
     tool_call_id: str,
     tool_name: str,
     args_json: str,
+    target: dict,
     preview: dict,
     perm: str,
 ) -> AgentAction:
@@ -45,6 +48,7 @@ def create_action_once(
     LangGraph 恢复时节点会从头重跑，重复调用也只会得到同一条 action，不会再建一条新的。
     """
     now = datetime.now()
+    target_json = canonical_json(target)
     stmt = mysql_insert(AgentAction).values(
         action_id=uuid.uuid4().hex,
         conversation_id=conversation_id,
@@ -52,7 +56,8 @@ def create_action_once(
         tool_call_id=tool_call_id,
         tool_name=tool_name,
         args_json=args_json,
-        args_hash=hash_args(args_json),
+        target_json=target_json,
+        args_hash=hash_action(args_json, target_json),
         preview_json=json.dumps(preview, ensure_ascii=False),
         perm=perm,
         status=ACTION_PENDING,
@@ -107,6 +112,7 @@ def action_to_dict(action: AgentAction) -> dict:
         "conversationId": action.conversation_id,
         "toolName": action.tool_name,
         "args": json.loads(action.args_json),
+        "target": json.loads(action.target_json),
         "preview": json.loads(action.preview_json or "{}"),
         "perm": action.perm,
         "status": action.status,

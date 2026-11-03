@@ -81,9 +81,11 @@ def _propose_one(ctx: AgentContext, conversation_id: str, call: dict) -> tuple[T
     try:
         # 预览完全由服务端查询生成：模型只能提供参数（已校验），预览文案、风险说明、所需权限都不来自模型
         preview = {**spec.preview(db, scoped_user, args, ctx.session_token), "perm": spec.perm, "toolName": name}
+        # 冻结服务端解析出的目标：只取 userId、userName，模型无法提供或修改（入参 schema 里没有这个字段）
+        target = {"userId": preview["target"]["userId"], "userName": preview["target"]["userName"]}
         args_json = actions.canonical_json(args.model_dump())
         action = actions.create_action_once(db, conversation_id, ctx.login_user["user_id"], call_id, name, args_json,
-                                            preview, spec.perm)
+                                            target, preview, spec.perm)
         if action.user_id != ctx.login_user["user_id"] or action.tool_name != name:
             return error_message(call_id, name, MSG_ACTION_MISMATCH), None
         return None, action.action_id
@@ -157,14 +159,14 @@ def _run(db, ctx: AgentContext, action) -> None:
     try:
         if spec is None or spec.execute is None or spec.perm != action.perm:
             raise ServiceException(MSG_TOOL_MISMATCH)
-        if actions.hash_args(action.args_json) != action.args_hash:
+        if actions.hash_action(action.args_json, action.target_json) != action.args_hash:
             raise ServiceException(MSG_ARGS_TAMPERED)
         if actions.is_expired(action):
             raise ServiceException(MSG_EXPIRED)
         args = spec.args_model.model_validate_json(action.args_json)
         # 用本次请求重新解析的登录态校验权限：等待审批期间权限被撤销，重新登录后这里会被拒绝
         scoped_user = check_perm(ctx.login_user, spec.perm)
-        result = strip_forbidden(spec.execute(db, scoped_user, args, ctx.session_token))
+        result = strip_forbidden(spec.execute(db, scoped_user, args, ctx.session_token, json.loads(action.target_json)))
         final_status = ACTION_SUCCEEDED
     except ServiceException as exc:
         db.rollback()
@@ -184,7 +186,8 @@ def _run(db, ctx: AgentContext, action) -> None:
         spec.oper_title if spec else AGENT_OPER_LOG_SOURCE,
         spec.business_type if spec else BIZ_OTHER,
         ctx.login_user,
-        {"actionId": action.action_id, "toolName": action.tool_name, "args": json.loads(action.args_json)},
+        {"actionId": action.action_id, "toolName": action.tool_name, "args": json.loads(action.args_json),
+         "target": json.loads(action.target_json)},
         {"status": final_status, "result": result} if final_status == ACTION_SUCCEEDED else None,
         OPER_STATUS_SUCCESS if final_status == ACTION_SUCCEEDED else OPER_STATUS_FAIL,
         error,
