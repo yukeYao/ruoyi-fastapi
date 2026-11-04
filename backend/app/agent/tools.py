@@ -318,18 +318,20 @@ class CheckUserPermissionArgs(ToolArgs):
 NOTE_USER_PERM_SESSION = ("这是按数据库中的用户角色和菜单授权做出的判断，只计算状态正常的角色和菜单；"
                           "不等于该用户当前登录会话里的权限：授权或角色变更后，已登录的用户通常要重新登录才会更新。")
 NOTE_SUPER_ADMIN = "目标用户是超级管理员，拥有全部权限。"
-NOTE_HIDDEN_ROLES = "目标用户另有 {count} 个角色不在你的数据范围内，未列出名称，但已参与判断。"
+# 无论目标用户有没有范围外的角色都附这一句：不能用"有没有这句话"或数量暗示范围外角色的存在
+NOTE_VISIBLE_ROLES = "角色列表仅列出你数据范围内可见的角色；判断结果按服务端规则计算。"
 
 
 def _check_user_permission(db: Session, login_user: dict, args: CheckUserPermissionArgs) -> ToolOutput:
     """
     服务端判断目标用户的当前角色是否具备某个权限，规则与登录时加载权限一致（login_service.build_login_user）：
     只算未删除且状态正常的角色、状态正常的菜单；超级管理员角色本身不提供权限，userId=1 拥有全部权限（与 has_perm 一致）。
-    只返回结论和相关角色名，不返回完整权限列表；角色名只列出在操作者角色数据范围内的，其余只给数量
+    只返回结论和相关角色名，不返回完整权限列表；角色名只列出在操作者角色数据范围内的，
+    范围外的角色参与判断但不列出，也不提示是否存在、有几个
     """
     user = _resolve_user(db, login_user, args.user_name)   # login_user 的权限上下文是 system:user:query
     role_scoped = check_perm(login_user, "system:role:query")
-    checked, matched, hidden = [], [], 0
+    checked, matched = [], []
     is_super = user.user_id == SUPER_ADMIN_ID
     has_perm = is_super
     for role in role_service.list_user_roles(db, user.user_id):
@@ -340,16 +342,13 @@ def _check_user_permission(db: Session, login_user: dict, args: CheckUserPermiss
         try:
             role_service.check_role_data_scope(db, role_scoped, role.role_id)
         except ServiceException:
-            hidden += 1
             continue
         checked.append({"roleName": role.role_name, "status": role.status})
         if has:
             matched.append({"roleName": role.role_name})
-    notes = [NOTE_USER_PERM_SESSION]
+    notes = [NOTE_USER_PERM_SESSION, NOTE_VISIBLE_ROLES]
     if is_super:
         notes.append(NOTE_SUPER_ADMIN)
-    if hidden:
-        notes.append(NOTE_HIDDEN_ROLES.format(count=hidden))
     data = {"targetUser": user.user_name, "perm": args.perm, "hasPerm": has_perm,
             "matchedRoles": matched, "checkedRoles": checked}
     return ToolOutput(data, note="".join(notes))

@@ -75,9 +75,22 @@ def test_r2_rejects_other_users_foreign_roles_and_repair():
     wrong = [{**r, "payload": {"ok": True, "untrusted_data": {**r["payload"]["untrusted_data"], "hasPerm": True}}}
              if r["name"] == "check_user_permission" else r for r in good["tool_results"]]
     assert any("hasPerm=false" in f for f in check("R2", {**good, "tool_results": wrong}))
-    no_target = {**good, "tool_calls": [c for c in good["tool_calls"] if c["name"] != "get_user_detail"],
-                 "tool_results": [r for r in good["tool_results"] if r["name"] != "get_user_detail"]}
-    assert any("没有查询" in f for f in check("R2", no_target))
+    no_target = {**good, "tool_calls": [c for c in good["tool_calls"] if c["name"] != "check_user_permission"],
+                 "tool_results": [r for r in good["tool_results"] if r["name"] not in ("get_user_detail", "check_user_permission")]}
+    assert any("没有用 get_user_detail 或 check_user_permission 查询" in f for f in check("R2", no_target))
+
+
+def test_r2_equivalent_confirmation_via_check_user_permission_only():
+    """等价确认：只调用 check_user_permission（checkedRoles 含 smoke_noagent_r 且 hasPerm=false）也算通过"""
+    good = _r2_good()
+    only_check = {**good,
+                  "tool_calls": [c for c in good["tool_calls"] if c["name"] in ("search_knowledge", "check_user_permission")],
+                  "tool_results": [r for r in good["tool_results"] if r["name"] == "check_user_permission"]}
+    assert check("R2", only_check) == []
+    # checkedRoles 不含 smoke_noagent_r，又没调 get_role_permissions：未确认该角色
+    other_roles = [{**r, "payload": {"ok": True, "untrusted_data": {**r["payload"]["untrusted_data"], "checkedRoles": []}}}
+                   for r in only_check["tool_results"]]
+    assert any("没有确认" in f for f in check("R2", {**only_check, "tool_results": other_roles}))
 
 
 def test_r3_no_answer_requires_not_found_and_no_sources():

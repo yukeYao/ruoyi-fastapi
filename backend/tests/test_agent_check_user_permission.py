@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from app.agent import policy
-from app.agent.tools import MSG_USER_UNAVAILABLE, NOTE_USER_PERM_SESSION, TOOLS
+from app.agent.tools import MSG_USER_UNAVAILABLE, NOTE_USER_PERM_SESSION, NOTE_VISIBLE_ROLES, TOOLS
 from app.core.database import SessionLocal
 from main import app
 from tests.agent_helpers import (
@@ -176,10 +176,10 @@ def test_no_full_perm_list_or_other_user_fields():
     assert "userId" not in text_ and "roleId" not in text_
 
 
-def test_roles_outside_role_scope_are_not_named():
+def test_roles_outside_role_scope_are_not_named_or_counted():
     """
     操作者查用户的数据范围（本部门）和查角色的数据范围（仅本人）来自不同角色：目标用户在范围内，
-    但他的角色不在操作者的角色数据范围内——结论照常计算，角色名不列出，只在外层说明数量
+    但他的角色不在操作者的角色数据范围内——结论照常计算；角色名不列出，note 与没有范围外角色时完全相同，不提数量
     """
     admin = auth_headers(client)
     user_side = add_role(client, admin, "cup_us_r", [MENU_AGENT, MENU_USER, MENU_USER_QUERY], data_scope="3")
@@ -187,11 +187,17 @@ def test_roles_outside_role_scope_are_not_named():
     add_user(client, admin, "cup_op_u", [user_side, role_side], dept_id=105)
     hidden = add_role(client, admin, "cup_hidden_r", [MENU_AGENT])
     add_user(client, admin, "cup_target_u", [hidden], dept_id=105)
+    # 对照：操作者自己（角色都在他的角色数据范围内，没有范围外角色）
     headers = auth_headers(client, "cup_op_u", PASSWORD)
-    payload = _check(headers, "cup_target_u")
-    assert payload["untrusted_data"]["hasPerm"] is True
-    assert payload["untrusted_data"]["matchedRoles"] == [] and payload["untrusted_data"]["checkedRoles"] == []
-    assert "cup_hidden_r" not in json.dumps(payload, ensure_ascii=False) and "1 个角色" in payload["note"]
+    results = _checks(headers, [("cup_target_u", "agent:chat:use", "hidden"), ("cup_op_u", "agent:chat:use", "visible")])
+    with_hidden, without_hidden = results["hidden"], results["visible"]
+    assert with_hidden["untrusted_data"]["hasPerm"] is True
+    assert with_hidden["untrusted_data"]["matchedRoles"] == [] and with_hidden["untrusted_data"]["checkedRoles"] == []
+    assert _names(without_hidden["untrusted_data"]["checkedRoles"]) == ["cup_us_r", "cup_rs_r"]
+    # note 完全相同，不出现数量
+    assert with_hidden["note"] == without_hidden["note"] == NOTE_USER_PERM_SESSION + NOTE_VISIBLE_ROLES
+    text_ = json.dumps(with_hidden, ensure_ascii=False)
+    assert "cup_hidden_r" not in text_ and "1 个" not in text_
 
 
 def test_r2_style_flow_needs_no_other_role():
