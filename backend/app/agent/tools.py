@@ -256,8 +256,9 @@ class SearchKnowledgeArgs(ToolArgs):
 
 
 # 检索到内容时附在外层的引用要求。只是提高模型写引用的概率：来源是否成立由服务端校验（agent/citations.py），
-# 没写引用时服务端最多做一次引用修复，都不依赖模型遵守这句话
-NOTE_CITE = "回答用到这些片段时，在对应句子后写上片段的 [chunkId]，例如 [password-lock#01]；只能使用这里返回的 chunkId。"
+# 不依赖模型遵守这句话；没写引用就保持 uncited
+NOTE_CITE = ("回答用到这些片段时，在对应句子后写上片段的 [chunkId]，例如 [password-lock#01]；"
+             "只能使用这里返回的 chunkId，之前轮次的 chunkId 在本轮无效。")
 
 
 def _search_knowledge(db: Session, login_user: dict, args: SearchKnowledgeArgs) -> ToolOutput:
@@ -315,8 +316,13 @@ class CheckUserPermissionArgs(ToolArgs):
                       description="要判断的权限字符，例如 agent:chat:use")
 
 
-NOTE_USER_PERM_SESSION = ("这是按数据库中的用户角色和菜单授权做出的判断，只计算状态正常的角色和菜单；"
-                          "不等于该用户当前登录会话里的权限：授权或角色变更后，已登录的用户通常要重新登录才会更新。")
+NOTE_USER_PERM_SESSION = "这是按数据库中的用户角色和菜单授权做出的判断，只计算状态正常的角色和菜单。"
+# 结论说明按 hasPerm 二选一，固定文案。评估 L01 发现：没有权限时模型仍只建议"重新登录"，
+# 所以由服务端明确"重新登录解决不了"；只有配置已具备权限时，才提示可能是会话没更新
+NOTE_PERM_MISSING = ("结论：该用户当前的角色配置没有这个权限。需要管理员为该用户的角色授予这个权限，"
+                     "或给该用户分配拥有这个权限的角色；只重新登录不能解决。")
+NOTE_PERM_PRESENT = ("结论：该用户当前的角色配置已具备这个权限。如果该用户仍看不到对应菜单或功能，"
+                     "可能是授权后还没有重新登录，已登录的会话不会自动更新权限，重新登录后生效。")
 NOTE_SUPER_ADMIN = "目标用户是超级管理员，拥有全部权限。"
 # 无论目标用户有没有范围外的角色都附这一句：不能用"有没有这句话"或数量暗示范围外角色的存在
 NOTE_VISIBLE_ROLES = "角色列表仅列出你数据范围内可见的角色；判断结果按服务端规则计算。"
@@ -346,7 +352,7 @@ def _check_user_permission(db: Session, login_user: dict, args: CheckUserPermiss
         checked.append({"roleName": role.role_name, "status": role.status})
         if has:
             matched.append({"roleName": role.role_name})
-    notes = [NOTE_USER_PERM_SESSION, NOTE_VISIBLE_ROLES]
+    notes = [NOTE_USER_PERM_SESSION, NOTE_PERM_PRESENT if has_perm else NOTE_PERM_MISSING, NOTE_VISIBLE_ROLES]
     if is_super:
         notes.append(NOTE_SUPER_ADMIN)
     data = {"targetUser": user.user_name, "perm": args.perm, "hasPerm": has_perm,
@@ -405,7 +411,8 @@ _TOOL_LIST = [
     # 知识库只读：检索内容是文档数据，放在 untrusted_data；降级、无结果的说明是服务端外层 note
     ToolSpec("search_knowledge",
              "检索知识库中的系统规则、权限配置、操作步骤和常见问题。规则类和排查类问题（例如某账号为什么看不到某菜单）"
-             "先用它获取判定规则，再用业务工具确认实时状态；知识库只说明规则，不代表实时数据",
+             "先用它获取判定规则，再用业务工具确认实时状态；知识库只说明规则，不代表实时数据。"
+             "返回的 chunkId 只在本轮有效：追问时要引用规则，需要重新调用本工具",
              RISK_READ, AGENT_CHAT_PERM, SearchKnowledgeArgs, _search_knowledge,
              ("docId", "title", "section", "chunkId", "snippet", "score")),
     # 同时读用户和角色：两项权限都要有；数据范围的权限上下文是 system:user:query（解析用户），角色可见性另按 system:role:query

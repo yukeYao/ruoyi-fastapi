@@ -10,7 +10,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from app.agent import policy
-from app.agent.tools import MSG_USER_UNAVAILABLE, NOTE_USER_PERM_SESSION, NOTE_VISIBLE_ROLES, TOOLS
+from app.agent.tools import (MSG_USER_UNAVAILABLE, NOTE_PERM_MISSING, NOTE_PERM_PRESENT, NOTE_USER_PERM_SESSION,
+                             NOTE_VISIBLE_ROLES, TOOLS)
 from app.core.database import SessionLocal
 from main import app
 from tests.agent_helpers import (
@@ -80,8 +81,28 @@ def test_user_without_permission():
     admin = auth_headers(client)
     role = add_role(client, admin, "cup_no_r", [MENU_USER])
     add_user(client, admin, "cup_no_u", [role])
-    data = _check(admin, "cup_no_u")["untrusted_data"]
+    payload = _check(admin, "cup_no_u")
+    data = payload["untrusted_data"]
     assert data["hasPerm"] is False and data["matchedRoles"] == [] and _names(data["checkedRoles"]) == ["cup_no_r"]
+    # 没有权限：外层可信说明明确需要管理员授权、只重新登录不能解决，不出现"可能需要重新登录"的提示
+    assert payload["note"] == NOTE_USER_PERM_SESSION + NOTE_PERM_MISSING + NOTE_VISIBLE_ROLES
+    assert "管理员" in payload["note"] and "只重新登录不能解决" in payload["note"]
+    assert NOTE_PERM_PRESENT not in payload["note"]
+
+
+def test_note_depends_only_on_conclusion():
+    """有权限时才提示"可能需要重新登录"；停用角色导致没有权限时，同样给出"需要管理员授权"的说明"""
+    admin = auth_headers(client)
+    role = add_role(client, admin, "cup_note_r", [MENU_AGENT])
+    add_user(client, admin, "cup_note_u", [role])
+    present = _check(admin, "cup_note_u")
+    assert present["untrusted_data"]["hasPerm"] is True
+    assert present["note"] == NOTE_USER_PERM_SESSION + NOTE_PERM_PRESENT + NOTE_VISIBLE_ROLES
+    assert NOTE_PERM_MISSING not in present["note"]
+    assert client.put("/system/role/changeStatus", headers=admin, json={"roleId": role, "status": "1"}).json()["code"] == 200
+    missing = _check(admin, "cup_note_u")
+    assert missing["untrusted_data"]["hasPerm"] is False
+    assert missing["note"] == NOTE_USER_PERM_SESSION + NOTE_PERM_MISSING + NOTE_VISIBLE_ROLES
 
 
 def test_multiple_roles_only_matching_one_listed():
@@ -195,7 +216,7 @@ def test_roles_outside_role_scope_are_not_named_or_counted():
     assert with_hidden["untrusted_data"]["matchedRoles"] == [] and with_hidden["untrusted_data"]["checkedRoles"] == []
     assert _names(without_hidden["untrusted_data"]["checkedRoles"]) == ["cup_us_r", "cup_rs_r"]
     # note 完全相同，不出现数量
-    assert with_hidden["note"] == without_hidden["note"] == NOTE_USER_PERM_SESSION + NOTE_VISIBLE_ROLES
+    assert with_hidden["note"] == without_hidden["note"] == NOTE_USER_PERM_SESSION + NOTE_PERM_PRESENT + NOTE_VISIBLE_ROLES
     text_ = json.dumps(with_hidden, ensure_ascii=False)
     assert "cup_hidden_r" not in text_ and "1 个" not in text_
 

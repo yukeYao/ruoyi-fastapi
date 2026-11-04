@@ -59,21 +59,10 @@
                     <span class="source-id">[{{ s.chunkId }}]</span>
                   </div>
                 </template>
-                <!-- 引用修复自动关联的分块：单独标注，不算普通来源 -->
-                <template v-else-if="item.knowledge.autoSources && item.knowledge.autoSources.length">
-                  <div class="sources-title">
-                    <el-tag size="small" type="warning">自动关联，未核验</el-tag>
-                    回答没有写引用，以下片段由系统自动关联到回答中的句子，未经核验
-                  </div>
-                  <div v-for="s in item.knowledge.autoSources" :key="s.chunkId" class="source-item">
-                    <span>{{ s.title }}</span><span v-if="s.section" class="source-section"> · {{ s.section }}</span>
-                    <span class="source-id">[{{ s.chunkId }}]</span>
-                  </div>
-                </template>
                 <el-tag v-else-if="KNOWLEDGE_STATUS[item.knowledge.status]" size="small" :type="KNOWLEDGE_STATUS[item.knowledge.status].type">
                   {{ KNOWLEDGE_STATUS[item.knowledge.status].label }}
                 </el-tag>
-                <div v-if="(item.knowledge.sources && item.knowledge.sources.length) || (item.knowledge.autoSources && item.knowledge.autoSources.length)" class="source-note">
+                <div v-if="item.knowledge.sources && item.knowledge.sources.length" class="source-note">
                   来源只表示内容来自本轮知识库检索，不代表回答已被验证为真
                 </div>
                 <div v-if="item.knowledge.invalidCitations" class="source-warning">
@@ -373,7 +362,7 @@ async function openConversation(id) {
 
 function createStreamHandler() {
   let current = null // 正在接收 token 的模型回复条目
-  let lastAssistant = null // 本次运行最后一条模型回复，final 时用服务端的最终文本覆盖（引用修复会补上 [chunkId]）
+  let lastAssistant = null // 本次运行最后一条模型回复，final 时用服务端的最终文本覆盖（以服务端保存的回复为准）
   return function onEvent(event, data) {
     if (event === 'token') {
       if (!current) {
@@ -419,11 +408,9 @@ function createStreamHandler() {
       pushKnowledge(data.knowledgeStatus ? {
         status: data.knowledgeStatus,
         sources: data.sources,
-        autoSources: data.autoSources,
         references: data.references,
         invalidCitations: data.invalidCitations,
-        suspiciousCitations: data.suspiciousCitations,
-        citationRepair: data.citationRepair
+        suspiciousCitations: data.suspiciousCitations
       } : null)
       applyResult(data)
     } else if (event === 'error') {

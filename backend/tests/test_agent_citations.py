@@ -22,8 +22,7 @@ def test_cited_source_comes_from_tool_result_not_reply():
     messages = [HumanMessage(content="问"), _search_call("c1"), _result("c1", [ROW]),
                 AIMessage(content="答案 [doc-a#01]（标题：伪造的标题）")]
     ann = citations.annotate(messages)[3]
-    assert ann == {"status": "cited", "invalidCitations": 0, "references": [], "citationRepair": None,
-                   "autoSources": [], "suspiciousCitations": 0,
+    assert ann == {"status": "cited", "invalidCitations": 0, "references": [], "suspiciousCitations": 0,
                    "sources": [{"chunkId": "doc-a#01", "docId": "doc-a", "title": "标题", "section": "章节"}]}
 
 
@@ -58,8 +57,7 @@ def test_new_turn_resets_valid_set():
 def test_not_found_and_uncited_statuses():
     empty = [HumanMessage(content="问"), _search_call("c1"), _result("c1", []), AIMessage(content="没有找到依据")]
     assert citations.annotate(empty)[3] == {"status": "not_found", "sources": [], "references": [],
-                                            "invalidCitations": 0, "citationRepair": None,
-                                            "autoSources": [], "suspiciousCitations": 0}
+                                            "invalidCitations": 0, "suspiciousCitations": 0}
     uncited = [HumanMessage(content="问"), _search_call("c1"), _result("c1", [ROW]), AIMessage(content="不写引用")]
     assert citations.annotate(uncited)[3]["status"] == "uncited"
 
@@ -75,58 +73,46 @@ def test_malformed_chunk_ids_in_rows_are_ignored():
 
 
 # ---------------------------------------------------------------------------
-# 引用修复的辅助函数：正文不变，只插入合法的 [chunkId]
+# 跨轮引用：追问时模型沿用上一轮的 chunkId（评估 U01、U03 实际发生过）
 # ---------------------------------------------------------------------------
 
-def test_insert_citations_keeps_text_and_places_before_punctuation():
-    text = "第一句。第二句！\n第三句"
-    out = citations.insert_citations(text, {1: ["a#01"], 3: ["b#02", "c#03"]})
-    assert out == "第一句[a#01]。第二句！\n第三句[b#02][c#03]"
-    assert citations.CITATION_PATTERN.sub("", out) == text
+def test_followup_with_previous_turn_chunk_is_invalid_even_if_new_search_ran():
+    """第二轮检索到的是别的分块，回复却写了上一轮的 chunkId：判为无效引用，不进入 sources"""
+    other = {**ROW, "docId": "doc-b", "chunkId": "doc-b#02"}
+    messages = [HumanMessage(content="一"), _search_call("c1"), _result("c1", [ROW]), AIMessage(content="[doc-a#01]"),
+                HumanMessage(content="二"), _search_call("c2"), _result("c2", [other]),
+                AIMessage(content="沿用上一轮 [doc-a#01]")]
+    ann = citations.annotate(messages)[7]
+    assert ann["status"] == "uncited" and ann["sources"] == [] and ann["invalidCitations"] == 1
+    assert [r["chunkId"] for r in ann["references"]] == ["doc-b#02"]
 
 
-def test_split_sentences_round_trip():
-    text = "甲。乙；丙?\n\n丁"
-    assert "".join(citations.split_sentences(text)) == text
+# ---------------------------------------------------------------------------
+# 引用修复已移除：旧 checkpoint 里被修复过的回复按原文校验，服务端插入的标记不算来源
+# ---------------------------------------------------------------------------
+
+def test_annotation_has_no_repair_fields():
+    messages = [HumanMessage(content="问"), _search_call("c1"), _result("c1", [ROW]), AIMessage(content="不写引用")]
+    ann = citations.annotate(messages)[3]
+    assert ann["status"] == "uncited" and "autoSources" not in ann and "citationRepair" not in ann
+    assert [r["chunkId"] for r in ann["references"]] == ["doc-a#01"]
 
 
-def test_parse_repair_only_accepts_valid_ids_and_sentence_numbers():
-    raw = json.dumps({"citations": [{"sentence": 1, "chunkIds": ["a#01", "evil#01"]},
-                                    {"sentence": 9, "chunkIds": ["a#01"]},
-                                    {"sentence": "2", "chunkIds": ["a#01"]},
-                                    {"sentence": 2, "chunkIds": "a#01"}]})
-    assert citations.parse_repair(raw, 2, {"a#01"}) == {1: ["a#01"]}
-    assert citations.parse_repair("```json\n" + raw + "\n```", 2, {"a#01"}) == {1: ["a#01"]}
-    assert citations.parse_repair("不是 JSON", 2, {"a#01"}) == {}
-    assert citations.parse_repair(json.dumps([1, 2]), 2, {"a#01"}) == {}
-
-
-def test_repair_status_only_from_known_values():
-    """修复状态是服务端写的展示信息；不认识的值一律当作没有"""
-    msg = AIMessage(content="答 [doc-a#01]", additional_kwargs={citations.REPAIR_KEY: {"status": "whatever"}})
-    messages = [HumanMessage(content="问"), _search_call("c1"), _result("c1", [ROW]), msg]
-    assert citations.annotate(messages)[3]["citationRepair"] is None
-
-
-def test_auto_cited_uses_repair_mapping_not_text():
-    """修复记录里映射的分块进 autoSources；同一个 chunkId 不会同时出现在 sources"""
-    record = {"status": "succeeded", "original": "答", "repaired": "答[doc-a#01]",
-              "mapping": [{"sentence": 1, "text": "答", "chunkIds": ["doc-a#01"]}]}
-    msg = AIMessage(content="答[doc-a#01]", additional_kwargs={citations.REPAIR_KEY: record})
+def test_legacy_repaired_reply_is_judged_on_original_text():
+    record = {"status": "succeeded", "original": "答。", "repaired": "答[doc-a#01]。",
+              "mapping": [{"sentence": 1, "text": "答。", "chunkIds": ["doc-a#01"]}]}
+    msg = AIMessage(content="答[doc-a#01]。", additional_kwargs={citations.LEGACY_REPAIR_KEY: record})
     ann = citations.annotate([HumanMessage(content="问"), _search_call("c1"), _result("c1", [ROW]), msg])[3]
-    assert ann["status"] == "auto_cited" and ann["sources"] == []
-    assert [s["chunkId"] for s in ann["autoSources"]] == ["doc-a#01"]
-    assert ann["citationRepair"]["original"] == "答" and ann["citationRepair"]["mapping"] == record["mapping"]
+    assert citations.message_text(msg) == "答。"
+    assert ann["status"] == "uncited" and ann["sources"] == [] and ann["invalidCitations"] == 0
+    assert [r["chunkId"] for r in ann["references"]] == ["doc-a#01"]
+
+
+def test_message_text_ignores_malformed_legacy_record():
+    msg = AIMessage(content="答 [doc-a#01]", additional_kwargs={citations.LEGACY_REPAIR_KEY: {"status": "x"}})
+    assert citations.message_text(msg) == "答 [doc-a#01]"
 
 
 def test_suspicious_citation_formats():
     assert citations.suspicious_count("见【密码错误锁定规则#01】和 [doc #2]") == 2
     assert citations.suspicious_count("见 [doc-a#01]【doc-a#02】[第3节]") == 0
-
-
-def test_used_business_tools_only_counts_current_turn():
-    other = AIMessage(content="", tool_calls=[{"name": "list_roles", "args": {}, "id": "r1"}])
-    messages = [HumanMessage(content="一"), other, HumanMessage(content="二"), _search_call("c1"),
-                _result("c1", [ROW]), AIMessage(content="答")]
-    assert citations.used_business_tools(messages, 5) is False
-    assert citations.used_business_tools(messages[:2] + [AIMessage(content="答")], 2) is True

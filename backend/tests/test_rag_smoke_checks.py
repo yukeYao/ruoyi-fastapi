@@ -247,7 +247,8 @@ def _make_smoke_user(client, admin, user_name, role_key):
 
 def test_cleanup_physically_deletes_smoke_data_and_redis_keys():
     """cleanup_smoke_data：smoke_ 用户、角色及关联物理删除，smoke_ 的日志、本次记录的会话、知识库行、登录态和计数删除"""
-    from app.core.constants import AGENT_RATE_LIMIT_KEY_PREFIX, LOGIN_TOKEN_KEY_PREFIX, LOGIN_USER_KEY
+    from app.core.constants import (AGENT_RATE_LIMIT_KEY_PREFIX, LOGIN_TOKEN_KEY_PREFIX, LOGIN_USER_KEY,
+                                    PWD_ERR_CNT_KEY_PREFIX)
     from app.core.oper_log import flush_oper_log_for_test
     from app.core.redis_client import redis_client
     from app.core.security import decode_jwt_token
@@ -258,6 +259,8 @@ def test_cleanup_physically_deletes_smoke_data_and_redis_keys():
     headers = env.login("smoke_cleanup_u", agent_helpers.PASSWORD)
     token_key = LOGIN_TOKEN_KEY_PREFIX + decode_jwt_token(headers["Authorization"].split(" ", 1)[1])[LOGIN_USER_KEY]
     redis_client.set(AGENT_RATE_LIMIT_KEY_PREFIX + str(user_id), 3)
+    # 评估"账号锁定"用例写入的密码错误计数（阶段 4 漏删的就是这个键）；账号本身不需要在本次记录里
+    redis_client.set(PWD_ERR_CNT_KEY_PREFIX + "smoke_ev_locked", 5)
     env.sql("INSERT INTO agent_conversation (conversation_id, user_id, title) VALUES ('smoke-conv-1', :u, 't')", u=user_id)
     env.sql("INSERT INTO agent_knowledge_index (id, build_id, index_version, embedding_model, dimension, chunk_count, "
             "vectors_digest) VALUES (1, 'smoke-build', 'v1', 'fake', 1, 0, :d)", d="0" * 64)
@@ -279,6 +282,7 @@ def test_cleanup_physically_deletes_smoke_data_and_redis_keys():
     assert count("SELECT COUNT(*) FROM agent_knowledge_index WHERE build_id = 'smoke-build'") == 0
     assert not redis_client.exists(token_key)
     assert not redis_client.exists(AGENT_RATE_LIMIT_KEY_PREFIX + str(user_id))
+    assert not redis_client.exists(PWD_ERR_CNT_KEY_PREFIX + "smoke_ev_locked")
 
 
 def test_cleanup_keeps_non_smoke_data():
@@ -286,7 +290,7 @@ def test_cleanup_keeps_non_smoke_data():
     不按时间删、不清空共享表：非 smoke 的用户（即使 ID 被误传进来）、角色、日志、会话、知识库行、
     其他用户的登录态都保留
     """
-    from app.core.constants import AGENT_RATE_LIMIT_KEY_PREFIX
+    from app.core.constants import AGENT_RATE_LIMIT_KEY_PREFIX, PWD_ERR_CNT_KEY_PREFIX
     from app.core.oper_log import flush_oper_log_for_test
     from app.core.redis_client import redis_client
     from tests.agent_helpers import MENU_USER, add_role, add_user
@@ -305,6 +309,11 @@ def test_cleanup_keeps_non_smoke_data():
     env.sql("INSERT INTO agent_knowledge_index (id, build_id, index_version, embedding_model, dimension, chunk_count, "
             "vectors_digest) VALUES (1, 'keep-build', 'v1', 'fake', 1, 1, :d)", d="0" * 64)
     redis_client.set(AGENT_RATE_LIMIT_KEY_PREFIX + str(keep_user), 1)
+    # 非 smoke 账号的密码错误计数，以及名字里带 smoke 但不是 smoke_ 开头的账号，都不删
+    keep_pwd_keys = [PWD_ERR_CNT_KEY_PREFIX + "ag_keep_u", PWD_ERR_CNT_KEY_PREFIX + "xsmoke_u",
+                     PWD_ERR_CNT_KEY_PREFIX + "smokeXu"]
+    for key in keep_pwd_keys:
+        redis_client.set(key, 2)
     flush_oper_log_for_test()
     count = lambda q, **kw: env.sql(q, **kw)[0][0]  # noqa: E731
     before = {"oper": count("SELECT COUNT(*) FROM sys_oper_log"),
@@ -331,7 +340,9 @@ def test_cleanup_keeps_non_smoke_data():
         assert count("SELECT COUNT(*) FROM agent_knowledge_chunk WHERE doc_id = 'keep-doc'") == 1
         assert count("SELECT COUNT(*) FROM agent_knowledge_index WHERE build_id = 'keep-build'") == 1
         assert redis_client.exists(AGENT_RATE_LIMIT_KEY_PREFIX + str(keep_user))
+        assert all(redis_client.exists(key) for key in keep_pwd_keys)
     finally:
+        redis_client.delete(*keep_pwd_keys)
         env.sql("DELETE FROM agent_conversation WHERE conversation_id = 'keep-conv'")
         for table in ("agent_knowledge_chunk", "agent_knowledge_doc"):
             env.sql(f"DELETE FROM {table} WHERE doc_id = 'keep-doc'")

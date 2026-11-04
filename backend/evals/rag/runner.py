@@ -150,10 +150,11 @@ def _post(headers: dict, message: str, conversation_id: str | None, sse: bool) -
 
 def _turn_record(data: dict) -> dict:
     calls = [c for m in data["messages"] if m["type"] == "ai" for c in m["toolCalls"]]
-    return {"reply": data["reply"], "sources": data["sources"], "autoSources": data["autoSources"],
+    # 引用修复已移除（v3）：接口不再返回 autoSources / citationRepair，这里固定为空，评分与 v2 的字段保持一致
+    return {"reply": data["reply"], "sources": data["sources"], "autoSources": data.get("autoSources", []),
             "references": data["references"], "invalidCitations": data["invalidCitations"],
             "suspiciousCitations": data["suspiciousCitations"], "knowledgeStatus": data["knowledgeStatus"],
-            "citationRepair": data["citationRepair"], "pendingAction": data["pendingAction"],
+            "citationRepair": data.get("citationRepair"), "pendingAction": data["pendingAction"],
             "searched": any(c["name"] == SEARCH for c in calls)}
 
 

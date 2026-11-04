@@ -183,10 +183,12 @@ def cleanup_smoke_data(env, records: SmokeRecords) -> None:
     只在测试库和 Redis db 1 上执行（先校验环境）。只删两类数据，不按时间删除、不清空共享表：
     - 本次运行明确记录的 ID：会话及其审批记录、知识库文档/分块、本次发布的索引行、本次的登录态和频率限制计数；
     - 名称带 smoke_ 前缀的数据：用户、角色及其关联（记录的 ID 还要再核对名称前缀，防止误删），
-      操作人或参数里带 smoke_ 的操作日志、smoke_ 账号的登录日志。
+      操作人或参数里带 smoke_ 的操作日志、smoke_ 账号的登录日志，
+      以及 smoke_ 账号的密码错误计数（pwd_err_cnt:smoke_*，评估的"账号锁定"用例会写入，阶段 4 曾漏删）。
     admin 等非 smoke 账号自己的登录日志不删。ID 都来自服务端查询并经过 int() 转换，按参数绑定执行
     """
-    from app.core.constants import AGENT_RATE_LIMIT_KEY_PREFIX, LOGIN_TOKEN_KEY_PREFIX, LOGIN_USER_KEY
+    from app.core.constants import (AGENT_RATE_LIMIT_KEY_PREFIX, LOGIN_TOKEN_KEY_PREFIX, LOGIN_USER_KEY,
+                                    ONLINE_SCAN_COUNT, PWD_ERR_CNT_KEY_PREFIX)
     from app.core.security import decode_jwt_token
 
     env.ensure_test_environment()
@@ -215,6 +217,9 @@ def cleanup_smoke_data(env, records: SmokeRecords) -> None:
         env.redis_client.delete(LOGIN_TOKEN_KEY_PREFIX + decode_jwt_token(token)[LOGIN_USER_KEY])
     for user_id in records.operator_ids:
         env.redis_client.delete(AGENT_RATE_LIMIT_KEY_PREFIX + str(int(user_id)))
+    # 按账号名记的计数：用户行已删，按前缀匹配。Redis 的 glob 里 _ 不是通配符，只匹配 smoke_ 开头的账号
+    for key in env.redis_client.scan_iter(match=PWD_ERR_CNT_KEY_PREFIX + SMOKE_PREFIX + "*", count=ONLINE_SCAN_COUNT):
+        env.redis_client.delete(key)
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +351,7 @@ def main(argv: list[str] | None = None) -> None:
                     conversations.append(data["conversationId"])
                     trace.update(reply=data["reply"], sources=data["sources"], invalidCitations=data["invalidCitations"],
                                  knowledgeStatus=data["knowledgeStatus"], pendingAction=data["pendingAction"],
-                                 references=data["references"], citationRepair=data["citationRepair"])
+                                 references=data["references"], citationRepair=data.get("citationRepair"))
                     for m in data["messages"]:
                         if m["type"] == "ai":
                             trace["tool_calls"] += [{"name": c["name"], "args": c["args"]} for c in m["toolCalls"]]

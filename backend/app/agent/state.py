@@ -24,5 +24,3 @@ class AgentState(TypedDict):
     call_keys: NotRequired[list[str]]
     result_hashes: NotRequired[list[str]]
     stall_count: NotRequired[int]
-    # 本轮是否已经做过一次引用修复（每条新用户消息重置）：保证一轮最多修复一次
-    citation_repaired: NotRequired[bool]
