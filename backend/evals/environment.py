@@ -103,11 +103,13 @@ def _menu_ids(perms: list[str]) -> list[int]:
 
 def prepare() -> None:
     ensure_test_environment()
-    from scripts.init_db import AGENT_SQL_FILE, create_database_if_not_exists, import_sql_file
+    from scripts.init_db import AGENT_SQL_FILE, KNOWLEDGE_SQL_FILE, create_database_if_not_exists, import_sql_file
 
     create_database_if_not_exists()
     import_sql_file()
     import_sql_file(AGENT_SQL_FILE)
+    # 知识库表：没有它，search_knowledge 在评估里只会返回"索引不可用"
+    import_sql_file(KNOWLEDGE_SQL_FILE)
     redis_client.flushdb()
     sql("UPDATE sys_config SET config_value = 'false' WHERE config_key = 'sys.account.captchaEnabled'")
 

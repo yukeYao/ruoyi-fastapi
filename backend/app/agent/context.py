@@ -24,11 +24,14 @@ class AgentContext:
     # 操作者自己的会话 tokenId：只用于"强制下线"时排除操作者自己的会话，不传给工具的 login_user
     session_token: str | None = None
     client_ip: str = ""
-    # time.monotonic() 的截止时间：每次调用模型前检查，保证运行在运行锁过期之前结束
+    # time.monotonic() 的软截止时间：每次调用模型前检查，降低运行超过运行锁时长的可能（不是硬上限）
     deadline: float = 0.0
+    # 本次运行允许使用的工具名（None 表示不额外限制）。只会在权限过滤的基础上再收窄：
+    # 不在其中的工具不绑定，硬调用也按未知工具拒绝。评估用它构造"无知识库""只有知识库"等对照方案
+    tool_names: frozenset[str] | None = None
 
 
-def build_context(login_user: dict, model: Any, client_ip: str = "") -> AgentContext:
+def build_context(login_user: dict, model: Any, client_ip: str = "", tool_names: frozenset[str] | None = None) -> AgentContext:
     safe_login_user = {k: v for k, v in login_user.items() if k not in _CREDENTIAL_KEYS}
     return AgentContext(
         login_user=safe_login_user,
@@ -36,4 +39,5 @@ def build_context(login_user: dict, model: Any, client_ip: str = "") -> AgentCon
         session_token=login_user.get("token"),
         client_ip=client_ip,
         deadline=time.monotonic() + AGENT_RUN_DEADLINE_SECONDS,
+        tool_names=tool_names,
     )

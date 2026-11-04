@@ -22,6 +22,7 @@ from langgraph.errors import GraphRecursionError
 from langgraph.types import Command
 from sqlalchemy.orm import Session
 
+from app.agent import citations
 from app.agent.context import build_context
 from app.agent.graph import get_graph
 from app.agent.serialization import tool_error
@@ -168,10 +169,15 @@ def list_conversations(db: Session, login_user: dict, page_num: int, page_size: 
 # 消息序列化（返回给前端）
 # ---------------------------------------------------------------------------
 
-def _message_to_dict(message: BaseMessage) -> dict:
+def _message_to_dict(message: BaseMessage, knowledge: dict | None = None) -> dict:
     data = {"type": message.type, "content": message.content if isinstance(message.content, str) else str(message.content)}
     if isinstance(message, AIMessage):
+        # 旧会话里被引用修复改写过的回复按原文显示（修复已移除，插入的标记不是模型写的引用）
+        data["content"] = citations.message_text(message) or data["content"]
         data["toolCalls"] = [{"id": c["id"], "name": c["name"], "args": c["args"]} for c in message.tool_calls]
+        if knowledge is not None:
+            # 服务端按本轮检索结果校验过的引用（citations.annotate），前端只用它显示来源
+            data["knowledge"] = knowledge
     if isinstance(message, ToolMessage):
         data["toolCallId"] = message.tool_call_id
         data["name"] = message.name
@@ -210,7 +216,9 @@ def _pending_action_dict(db: Session, snapshot) -> dict | None:
 def get_messages(db: Session, login_user: dict, conversation_id: str) -> tuple[list[dict], dict | None]:
     get_owned_conversation(db, login_user, conversation_id)
     snapshot = get_graph().get_state(_thread_config(conversation_id))
-    messages = [_message_to_dict(m) for m in (snapshot.values or {}).get("messages", [])]
+    history = (snapshot.values or {}).get("messages", [])
+    knowledge = citations.annotate(history)
+    messages = [_message_to_dict(m, knowledge.get(i)) for i, m in enumerate(history)]
     return messages, _pending_action_dict(db, snapshot)
 
 
@@ -253,14 +261,26 @@ def _resume(graph, config: dict, ctx, decision: str) -> None:
 
 def _run_result(db: Session, graph, config: dict, conv_id: str, history_len: int) -> dict:
     snapshot = graph.get_state(config)
-    new_messages = (snapshot.values or {}).get("messages", [])[history_len:]
-    reply = next((m.content for m in reversed(new_messages) if isinstance(m, AIMessage) and not m.tool_calls), "")
+    history = (snapshot.values or {}).get("messages", [])
+    # 引用要在完整历史上校验：审批恢复的运行里，本轮中断前的检索结果在 history_len 之前
+    knowledge = citations.annotate(history)
+    reply_index = next((i for i in range(len(history) - 1, history_len - 1, -1)
+                        if isinstance(history[i], AIMessage) and not history[i].tool_calls), None)
+    reply = citations.message_text(history[reply_index]) if reply_index is not None else ""
+    reply_knowledge = knowledge.get(reply_index) if reply_index is not None else None
     return {
         "conversationId": conv_id,
         "reply": reply if isinstance(reply, str) else str(reply),
-        "messages": [_message_to_dict(m) for m in new_messages],
+        "messages": [_message_to_dict(m, knowledge.get(i)) for i, m in enumerate(history) if i >= history_len],
         # 停在审批上时，前端用它渲染审批卡片；预览取自数据库（服务端生成），不是模型输出
         "pendingAction": _pending_action_dict(db, snapshot),
+        # 最终回复的来源：只来自本轮 search_knowledge 实际返回的分块，模型写的无效引用只计数
+        "sources": reply_knowledge["sources"] if reply_knowledge else [],
+        # 本轮检索到、但回复没有引用的分块：不是回答依据，前端与来源分开显示
+        "references": reply_knowledge["references"] if reply_knowledge else [],
+        "invalidCitations": reply_knowledge["invalidCitations"] if reply_knowledge else 0,
+        "suspiciousCitations": reply_knowledge["suspiciousCitations"] if reply_knowledge else 0,
+        "knowledgeStatus": reply_knowledge["status"] if reply_knowledge else None,
     }
 
 

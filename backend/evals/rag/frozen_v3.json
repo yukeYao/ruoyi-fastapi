@@ -1,0 +1,44 @@
+{
+  "note": "v3 运行前冻结的内容（2026-11-04）。holdout_sha256：hold-out 集文件的 sha256，运行检索评估前校验，不一致就拒绝运行；calibration：v3 网格（τb 0~15、最少命中词 1~5）只在 dev 上校准的门槛，hold-out 报告直接使用，不在运行中重新选择；生产默认门槛（app/config.py）= hybrid（混合检索）和 bm25（降级）两行，有测试保证一致。",
+  "holdout_file": "retrieval_holdout.json",
+  "holdout_sha256": "cb993b6c019b1ae61634e1da31f185e7f5183d682e2527276e4008896107d177",
+  "calibration_source": "v2 运行目录 evals/results/20261104-142735-rag-eval/candidates.json 中 dev 33 条的候选分数（text-embedding-3-small；知识库文档与 v2 相同），按 metrics.calibrate 网格搜索，目标 J=0.5×Recall@4+0.5×拒答率，同分依次取 MRR 更高、门槛更严",
+  "calibration": {
+    "bm25": {
+      "min_vector_score": 1000000000.0,
+      "min_bm25_score": 8.0,
+      "min_bm25_terms": 3
+    },
+    "vector": {
+      "min_vector_score": 0.5,
+      "min_bm25_score": 1000000000.0,
+      "min_bm25_terms": 99
+    },
+    "hybrid": {
+      "min_vector_score": 0.5,
+      "min_bm25_score": 15.0,
+      "min_bm25_terms": 5
+    }
+  },
+  "calibration_dev": {
+    "bm25": {
+      "J": 0.7,
+      "recall_at_4": 0.4,
+      "rejection": 1.0,
+      "mrr": 0.44
+    },
+    "vector": {
+      "J": 0.8975,
+      "recall_at_4": 0.92,
+      "rejection": 0.875,
+      "mrr": 0.8167
+    },
+    "hybrid": {
+      "J": 0.8575,
+      "recall_at_4": 0.84,
+      "rejection": 0.875,
+      "mrr": 0.8633,
+      "plateau": "同一最优 (J, MRR) 的组合共 72 个，τv 都是 0.5；τb 在 [7.5, 15]（最少命中词 3）到 [0, 15]（最少命中词 5）都相同，等价于只靠向量路准入。按同分取更严，落在网格上界 15 / 5——这是平台，不是网格外还有更优值"
+    }
+  }
+}

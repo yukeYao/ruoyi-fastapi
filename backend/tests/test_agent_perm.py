@@ -4,7 +4,7 @@ import json
 from fastapi.testclient import TestClient
 
 from app.agent.policy import msg_no_permission
-from app.agent.tools import TOOLS
+from app.agent.tools import MSG_USER_UNAVAILABLE, TOOLS
 from main import app
 from tests.agent_helpers import (
     MENU_AGENT,
@@ -42,7 +42,8 @@ def test_model_only_sees_permitted_tools(scripted_model):
     _, headers = user_with_menus(client, "onlyuser", [MENU_AGENT, MENU_USER])
     body = chat(client, headers, "查一下用户")
     assert body["code"] == 200, body
-    assert fake.bound_tool_names == ["search_users"]
+    # search_knowledge 只需要 agent:chat:use，所有能用智能助手的账号都有
+    assert sorted(fake.bound_tool_names) == ["search_knowledge", "search_users"]
 
 
 def test_admin_sees_all_tools(scripted_model):
@@ -56,14 +57,15 @@ def test_write_tool_bound_only_with_its_perm(scripted_model):
     fake = scripted_model(final())
     _, headers = user_with_menus(client, "editor", [MENU_AGENT, MENU_USER, 1002])
     chat(client, headers, "你好")
-    assert sorted(fake.bound_tool_names) == ["change_user_status", "search_users"]
+    assert sorted(fake.bound_tool_names) == ["change_user_status", "search_knowledge", "search_users"]
 
 
-def test_user_without_any_tool_perm_gets_no_tools(scripted_model):
-    fake = scripted_model(final("我没有可用的工具"))
+def test_user_without_any_business_perm_gets_only_knowledge_tool(scripted_model):
+    """只有智能助手菜单：业务工具一个都看不到，只有知识库检索（同样只需要 agent:chat:use）"""
+    fake = scripted_model(final("我只能查询知识库"))
     _, headers = user_with_menus(client, "notool", [MENU_AGENT])
     assert chat(client, headers, "你好")["code"] == 200
-    assert fake.bound_tool_names == []
+    assert fake.bound_tool_names == ["search_knowledge"]
 
 
 def test_hard_call_to_unpermitted_tool_is_rejected(scripted_model):
@@ -109,10 +111,11 @@ def test_multi_role_data_scope_matches_route(scripted_model):
 def test_get_user_detail_out_of_scope_is_blocked(scripted_model):
     from tests.agent_helpers import MENU_USER_QUERY
 
-    c = call("get_user_detail", {"user_id": 1})
+    c = call("get_user_detail", {"user_name": "admin"})
     scripted_model(tool_msg(c), final())
     # 本部门(105)数据权限，查部门 103 的 admin
     _, headers = user_with_menus(client, "scope", [MENU_AGENT, MENU_USER, MENU_USER_QUERY], data_scope="3")
     result = tool_results(chat(client, headers, "查 admin"))[c["id"]]
     assert result["status"] == "error"
-    assert "没有权限访问用户数据" in result["content"]
+    # 范围外与不存在同一句话，见 test_agent_user_detail.py
+    assert MSG_USER_UNAVAILABLE in result["content"]

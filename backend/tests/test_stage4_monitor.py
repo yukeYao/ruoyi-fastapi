@@ -1,8 +1,7 @@
 """阶段4验收测试：操作日志 / 登录日志 / 在线用户"""
-import time
-
 from fastapi.testclient import TestClient
 
+from app.core.oper_log import flush_oper_log_for_test
 from app.core.redis_client import redis_client
 from main import app
 from tests.conftest import auth_headers
@@ -14,15 +13,15 @@ def _admin_headers():
     return auth_headers(client, "admin", "admin123")
 
 
-def _wait_for_oper_log(headers, title: str, timeout: float = 3.0) -> dict:
-    """@log 装饰器用线程池异步写库，这里轮询等它落库，避免测试里出现竞态"""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        resp = client.get("/monitor/operlog/list", headers=headers, params={"title": title, "pageSize": 1})
-        body = resp.json()
-        if body["total"] > 0:
-            return body["rows"][0]
-        time.sleep(0.1)
+def _wait_for_oper_log(headers, title: str) -> dict:
+    """
+    @log 装饰器用线程池异步写库：先等已提交的日志全部写完，再查询。
+    不用轮询：轮询在机器忙时会超时，也挡不住上一个请求的日志晚到（例如晚于"清空"才落库）
+    """
+    flush_oper_log_for_test()
+    body = client.get("/monitor/operlog/list", headers=headers, params={"title": title, "pageSize": 1}).json()
+    if body["total"] > 0:
+        return body["rows"][0]
     raise AssertionError(f"等待操作日志 '{title}' 落库超时")
 
 
@@ -54,18 +53,9 @@ def test_failed_operation_logs_error_status():
     assert resp.json()["code"] == 500
 
     row = _wait_for_oper_log(headers, "岗位管理")
-    # 可能命中上一条新增日志，多取几条找删除操作那条
-    deadline = time.time() + 3
-    found = None
-    while time.time() < deadline:
-        rows = client.get("/monitor/operlog/list", headers=headers, params={"title": "岗位管理", "pageSize": 20}).json()["rows"]
-        for r in rows:
-            if r["businessType"] == 3 and r["status"] == 1:
-                found = r
-                break
-        if found:
-            break
-        time.sleep(0.1)
+    # 可能命中上一条新增日志，多取几条找删除操作那条（_wait_for_oper_log 已等全部日志写完）
+    rows = client.get("/monitor/operlog/list", headers=headers, params={"title": "岗位管理", "pageSize": 20}).json()["rows"]
+    found = next((r for r in rows if r["businessType"] == 3 and r["status"] == 1), None)
     assert found is not None
     assert "不能删除" in found["errorMsg"] or "已分配" in found["errorMsg"]
 
@@ -77,6 +67,8 @@ def test_operlog_delete_and_clean():
 
     resp = client.delete(f"/monitor/operlog/{oper_id}", headers=headers)
     assert resp.json()["code"] == 200
+    # "删除"这个操作本身也会异步写一条日志：必须在清空之前落库，否则它可能晚于清空写入，清空后就不止一条
+    flush_oper_log_for_test()
 
     resp = client.delete("/monitor/operlog/clean", headers=headers)
     assert resp.json()["code"] == 200

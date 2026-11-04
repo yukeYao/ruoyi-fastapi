@@ -18,8 +18,34 @@ from sqlalchemy.orm import Session
 
 from app.agent.serialization import MASK_EMAIL, MASK_PHONE
 from app.agent import write_tools
-from app.core.constants import AGENT_MAX_PAGE_SIZE, BIZ_FORCE, BIZ_OTHER, BIZ_UPDATE
-from app.services import dept_service, logininfor_service, online_service, operlog_service, role_service, user_service
+from app.core.constants import (
+    AGENT_CHAT_PERM,
+    AGENT_MAX_PAGE_SIZE,
+    ALL_PERMISSION,
+    BIZ_FORCE,
+    BIZ_OTHER,
+    BIZ_UPDATE,
+    KNOWLEDGE_MAX_QUERY_CHARS,
+    KNOWLEDGE_MAX_TOP_K,
+    KNOWLEDGE_TOP_K,
+    STATUS_DISABLE,
+    STATUS_NORMAL,
+    SUPER_ADMIN_ID,
+    SUPER_ADMIN_ROLE_ID,
+)
+from app.core.deps import check_perm
+from app.core.exceptions import ServiceException
+from app.rag.documents import PERM_PATTERN
+from app.services import (
+    dept_service,
+    knowledge_service,
+    logininfor_service,
+    menu_service,
+    online_service,
+    operlog_service,
+    role_service,
+    user_service,
+)
 
 RISK_READ = "read"
 RISK_WRITE = "write"
@@ -28,6 +54,16 @@ RISK_WRITE = "write"
 _MAX_LIST_ROWS = 50
 # 日志类工具最多回看的天数
 _MAX_DAYS = 30
+
+
+@dataclass(frozen=True)
+class ToolOutput:
+    """
+    只读工具需要附带服务端说明时的返回值：data 照常经过白名单、放进 untrusted_data；
+    note 是服务端生成的固定文案，放在工具结果外层（可信），例如"知识库没有找到依据""列表已截断"
+    """
+    data: dict
+    note: str = ""
 
 
 class ToolArgs(BaseModel):
@@ -63,6 +99,13 @@ class ToolSpec:
     # 写入 sys_oper_log 的模块标题和业务类型，与对应的现有路由 @log 保持一致
     oper_title: str = ""
     business_type: int = BIZ_OTHER
+    # 除 perm 外还必须同时具备的权限（例如同时读用户和角色的工具）。perm 仍是执行时的权限上下文（数据范围按它计算）
+    extra_perms: tuple[str, ...] = ()
+
+    @property
+    def perms(self) -> tuple[str, ...]:
+        """绑定、执行前校验、能力边界都按这里的全部权限判断"""
+        return (self.perm, *self.extra_perms)
 
 
 def _since(days: int) -> datetime:
@@ -87,13 +130,41 @@ def _search_users(db: Session, login_user: dict, args: SearchUsersArgs) -> dict:
     return {"total": total, "rows": rows}
 
 
-class UserIdArgs(ToolArgs):
-    user_id: int = Field(ge=1, description="用户ID")
+class GetUserDetailArgs(ToolArgs):
+    """
+    只接受登录账号，不接受 user_id：真实冒烟中模型多次猜 user_id=1，查到的是 admin，再把结果当成目标用户回答。
+    extra="forbid" 保证提交 user_id 会被判为参数不合法，没有按 ID 查询的回退路径
+    """
+    user_name: str = Field(min_length=1, max_length=30,
+                           description="目标用户的登录账号（精确匹配）；只知道姓名或其他条件时先用 search_users 查询")
 
 
-def _get_user_detail(db: Session, login_user: dict, args: UserIdArgs) -> dict:
-    # get_user_detail 内部先做 check_user_data_scope，范围外用户直接抛"没有权限访问用户数据！"
-    detail = user_service.get_user_detail(db, login_user, args.user_id)
+# 不存在、范围外、匹配到多个账号都返回这一句：不回显参数，也不泄露范围外账号是否存在
+MSG_USER_UNAVAILABLE = "该用户不存在或不在你的数据范围内"
+
+
+def _resolve_user(db: Session, login_user: dict, user_name: str):
+    """
+    按登录账号精确解析未删除的唯一用户，并按 login_user 的权限上下文校验数据范围。
+    不存在、重名、范围外都抛同一句话（get_user_detail、check_user_permission 共用）
+    """
+    users = user_service.find_users_by_name(db, user_name)
+    if len(users) != 1:
+        raise ServiceException(MSG_USER_UNAVAILABLE)
+    try:
+        user_service.check_user_data_scope(db, login_user, users[0].user_id)
+    except ServiceException:
+        raise ServiceException(MSG_USER_UNAVAILABLE) from None
+    return users[0]
+
+
+def _get_user_detail(db: Session, login_user: dict, args: GetUserDetailArgs) -> dict:
+    user = _resolve_user(db, login_user, args.user_name)
+    try:
+        # get_user_detail 内部会再做一次 check_user_data_scope（按 system:user:query 计算数据范围）
+        detail = user_service.get_user_detail(db, login_user, user.user_id)
+    except ServiceException:
+        raise ServiceException(MSG_USER_UNAVAILABLE) from None
     role_names = {r["roleId"]: r["roleName"] for r in detail.get("roles", [])}
     roles = [{"roleId": rid, "roleName": role_names.get(rid, "")} for rid in detail.get("roleIds", [])]
     return {**detail["data"], "roles": roles}
@@ -178,6 +249,117 @@ def _list_online_sessions(db: Session, login_user: dict, args: ListOnlineArgs) -
     return {"total": len(rows), "rows": rows[:_MAX_LIST_ROWS]}
 
 
+class SearchKnowledgeArgs(ToolArgs):
+    query: str = Field(min_length=1, max_length=KNOWLEDGE_MAX_QUERY_CHARS,
+                       description=f"要查询的系统规则、权限配置或操作步骤问题，最多 {KNOWLEDGE_MAX_QUERY_CHARS} 字")
+    top_k: int = Field(default=KNOWLEDGE_TOP_K, ge=1, le=KNOWLEDGE_MAX_TOP_K, description="返回的片段数")
+
+
+# 检索到内容时附在外层的引用要求。只是提高模型写引用的概率：来源是否成立由服务端校验（agent/citations.py），
+# 不依赖模型遵守这句话；没写引用就保持 uncited
+NOTE_CITE = ("回答用到这些片段时，在对应句子后写上片段的 [chunkId]，例如 [password-lock#01]；"
+             "只能使用这里返回的 chunkId，之前轮次的 chunkId 在本轮无效。")
+
+
+def _search_knowledge(db: Session, login_user: dict, args: SearchKnowledgeArgs) -> ToolOutput:
+    # 权限过滤、降级、无结果说明都在 knowledge_service 里完成；这里只换成工具结果的字段名
+    result = knowledge_service.search_knowledge(db, login_user, args.query, args.top_k)
+    rows = [{"docId": h.doc_id, "title": h.title, "section": h.section, "chunkId": h.chunk_id, "snippet": h.snippet,
+             "score": h.score} for h in result.hits]
+    return ToolOutput({"total": len(rows), "rows": rows}, note=result.note + (NOTE_CITE if rows else ""))
+
+
+# 角色的权限字符最多列出这么多个；超出时标记 truncated，并在外层说明列表不完整
+MAX_ROLE_PERMS = 60
+MSG_ROLE_UNAVAILABLE = "该角色不存在或不在你的数据范围内"
+NOTE_ROLE_SESSION = ("以上是数据库中的角色配置，不等于用户当前登录会话里的权限：角色、菜单授权或角色状态变更后，"
+                     "已登录的用户通常要重新登录才会更新，不能据此断言用户当前会话已经生效。")
+NOTE_ROLE_DISABLED = "该角色已停用：停用的角色不会给用户带来任何权限。"
+NOTE_ROLE_TRUNCATED = ("权限字符共 {total} 个，这里只列出按字母排序的前 {shown} 个，列表不完整："
+                       "不能据此断言该角色没有某个权限，需要确认某个权限时用 perm 参数查询。")
+
+
+class GetRolePermissionsArgs(ToolArgs):
+    role_name: str = Field(min_length=1, max_length=30, description="角色名称（精确匹配），可先用 get_user_detail 或 list_roles 查到")
+    perm: str | None = Field(default=None, max_length=100, pattern=PERM_PATTERN.pattern,
+                             description="可选：要确认的权限字符，例如 agent:chat:use；给出时返回该角色是否拥有它")
+
+
+def _get_role_permissions(db: Session, login_user: dict, args: GetRolePermissionsArgs) -> ToolOutput:
+    role = role_service.get_role_by_name(db, args.role_name)
+    if role is None:
+        raise ServiceException(MSG_ROLE_UNAVAILABLE)
+    try:
+        # 数据范围按当前工具的权限字符（system:role:query）计算；范围外与不存在返回同一句话
+        role_service.check_role_data_scope(db, login_user, role.role_id)
+    except ServiceException:
+        raise ServiceException(MSG_ROLE_UNAVAILABLE) from None
+    perms = [ALL_PERMISSION] if role.role_id == SUPER_ADMIN_ROLE_ID else menu_service.list_role_perms(db, role.role_id)
+    data = {"roleId": role.role_id, "roleName": role.role_name, "roleKey": role.role_key, "status": role.status,
+            "dataScope": role.data_scope, "permCount": len(perms), "perms": perms[:MAX_ROLE_PERMS],
+            "truncated": len(perms) > MAX_ROLE_PERMS}
+    if args.perm:
+        # 完整列表上判断，不受截断影响
+        data["checkedPerm"] = args.perm
+        data["hasPerm"] = args.perm in perms or ALL_PERMISSION in perms
+    notes = [NOTE_ROLE_SESSION]
+    if role.status == STATUS_DISABLE:
+        notes.append(NOTE_ROLE_DISABLED)
+    if data["truncated"]:
+        notes.append(NOTE_ROLE_TRUNCATED.format(total=len(perms), shown=MAX_ROLE_PERMS))
+    return ToolOutput(data, note="".join(notes))
+
+
+class CheckUserPermissionArgs(ToolArgs):
+    user_name: str = Field(min_length=1, max_length=30, description="目标用户的登录账号（精确匹配）")
+    perm: str = Field(min_length=5, max_length=100, pattern=PERM_PATTERN.pattern,
+                      description="要判断的权限字符，例如 agent:chat:use")
+
+
+NOTE_USER_PERM_SESSION = "这是按数据库中的用户角色和菜单授权做出的判断，只计算状态正常的角色和菜单。"
+# 结论说明按 hasPerm 二选一，固定文案。评估 L01 发现：没有权限时模型仍只建议"重新登录"，
+# 所以由服务端明确"重新登录解决不了"；只有配置已具备权限时，才提示可能是会话没更新
+NOTE_PERM_MISSING = ("结论：该用户当前的角色配置没有这个权限。需要管理员为该用户的角色授予这个权限，"
+                     "或给该用户分配拥有这个权限的角色；只重新登录不能解决。")
+NOTE_PERM_PRESENT = ("结论：该用户当前的角色配置已具备这个权限。如果该用户仍看不到对应菜单或功能，"
+                     "可能是授权后还没有重新登录，已登录的会话不会自动更新权限，重新登录后生效。")
+NOTE_SUPER_ADMIN = "目标用户是超级管理员，拥有全部权限。"
+# 无论目标用户有没有范围外的角色都附这一句：不能用"有没有这句话"或数量暗示范围外角色的存在
+NOTE_VISIBLE_ROLES = "角色列表仅列出你数据范围内可见的角色；判断结果按服务端规则计算。"
+
+
+def _check_user_permission(db: Session, login_user: dict, args: CheckUserPermissionArgs) -> ToolOutput:
+    """
+    服务端判断目标用户的当前角色是否具备某个权限，规则与登录时加载权限一致（login_service.build_login_user）：
+    只算未删除且状态正常的角色、状态正常的菜单；超级管理员角色本身不提供权限，userId=1 拥有全部权限（与 has_perm 一致）。
+    只返回结论和相关角色名，不返回完整权限列表；角色名只列出在操作者角色数据范围内的，
+    范围外的角色参与判断但不列出，也不提示是否存在、有几个
+    """
+    user = _resolve_user(db, login_user, args.user_name)   # login_user 的权限上下文是 system:user:query
+    role_scoped = check_perm(login_user, "system:role:query")
+    checked, matched = [], []
+    is_super = user.user_id == SUPER_ADMIN_ID
+    has_perm = is_super
+    for role in role_service.list_user_roles(db, user.user_id):
+        active = role.status == STATUS_NORMAL and role.role_id != SUPER_ADMIN_ROLE_ID
+        has = active and args.perm in menu_service.list_role_perms(db, role.role_id)
+        # 结论按全部角色计算；只是范围外的角色不列名称
+        has_perm = has_perm or has
+        try:
+            role_service.check_role_data_scope(db, role_scoped, role.role_id)
+        except ServiceException:
+            continue
+        checked.append({"roleName": role.role_name, "status": role.status})
+        if has:
+            matched.append({"roleName": role.role_name})
+    notes = [NOTE_USER_PERM_SESSION, NOTE_PERM_PRESENT if has_perm else NOTE_PERM_MISSING, NOTE_VISIBLE_ROLES]
+    if is_super:
+        notes.append(NOTE_SUPER_ADMIN)
+    data = {"targetUser": user.user_name, "perm": args.perm, "hasPerm": has_perm,
+            "matchedRoles": matched, "checkedRoles": checked}
+    return ToolOutput(data, note="".join(notes))
+
+
 # ---------------------------------------------------------------------------
 # 写工具：模型调用后只生成 PENDING 审批（预览见 write_tools.py），用户批准后服务端才执行
 # ---------------------------------------------------------------------------
@@ -202,8 +384,9 @@ _TOOL_LIST = [
              SearchUsersArgs, _search_users,
              ("userId", "userName", "nickName", "deptId", "dept.deptName", "status", "phonenumber", "email",
               "loginIp", "loginDate", "createTime"), _USER_MASKS, data_scoped=True),
-    ToolSpec("get_user_detail", "查询单个用户详情及其角色（受数据权限限制）", RISK_READ, "system:user:query",
-             UserIdArgs, _get_user_detail,
+    # 结果里的 userName 是服务端实际解析到的账号，模型据此确认查到的就是目标用户
+    ToolSpec("get_user_detail", "按登录账号（精确）查询单个用户详情及其角色（受数据权限限制）；只知道姓名等条件时先用 search_users",
+             RISK_READ, "system:user:query", GetUserDetailArgs, _get_user_detail,
              ("userId", "userName", "nickName", "deptId", "status", "phonenumber", "email", "sex",
               "loginIp", "loginDate", "createTime", "remark", "roles"), _USER_MASKS),
     ToolSpec("list_roles", "分页查询角色", RISK_READ, "system:role:list", ListRolesArgs, _list_roles,
@@ -225,6 +408,25 @@ _TOOL_LIST = [
     # 不返回 tokenId：拿到它就能强制下线任意会话；强制下线工具改为按用户名在服务端解析会话
     ToolSpec("list_online_sessions", "查询在线会话", RISK_READ, "monitor:online:list", ListOnlineArgs, _list_online_sessions,
              ("userName", "deptName", "ipaddr", "loginLocation", "browser", "os", "loginTime")),
+    # 知识库只读：检索内容是文档数据，放在 untrusted_data；降级、无结果的说明是服务端外层 note
+    ToolSpec("search_knowledge",
+             "检索知识库中的系统规则、权限配置、操作步骤和常见问题。规则类和排查类问题（例如某账号为什么看不到某菜单）"
+             "先用它获取判定规则，再用业务工具确认实时状态；知识库只说明规则，不代表实时数据。"
+             "返回的 chunkId 只在本轮有效：追问时要引用规则，需要重新调用本工具",
+             RISK_READ, AGENT_CHAT_PERM, SearchKnowledgeArgs, _search_knowledge,
+             ("docId", "title", "section", "chunkId", "snippet", "score")),
+    # 同时读用户和角色：两项权限都要有；数据范围的权限上下文是 system:user:query（解析用户），角色可见性另按 system:role:query
+    ToolSpec("check_user_permission",
+             "判断某个用户当前的角色配置是否具备某个权限（服务端按状态正常的角色和菜单计算）。"
+             "判断某用户有没有某权限时优先用它，不需要自己挑角色查询",
+             RISK_READ, "system:user:query", CheckUserPermissionArgs, _check_user_permission,
+             ("targetUser", "perm", "hasPerm", "matchedRoles", "checkedRoles"), extra_perms=("system:role:query",)),
+    ToolSpec("get_role_permissions",
+             "按角色名称查询已知角色本身的状态、数据范围和已授权的权限字符（数据库配置，受数据权限限制）。"
+             "只用于查询已知的角色；判断某个用户有没有某权限用 check_user_permission。判断角色是否具备某个权限时传 perm 参数",
+             RISK_READ, "system:role:query", GetRolePermissionsArgs, _get_role_permissions,
+             ("roleId", "roleName", "roleKey", "status", "dataScope", "permCount", "perms", "truncated",
+              "checkedPerm", "hasPerm")),
     ToolSpec("change_user_status", "按登录账号启用或停用用户。只会提交审批，用户批准后才执行；停用不会让已登录会话下线",
              RISK_WRITE, "system:user:edit", ChangeUserStatusArgs,
              preview=write_tools.preview_change_user_status, execute=write_tools.execute_change_user_status,
@@ -252,6 +454,9 @@ TOOL_TITLES = {
     "get_login_lock_status": "查询账号锁定状态",
     "search_oper_logs": "查询操作日志",
     "list_online_sessions": "查询在线会话",
+    "search_knowledge": "检索知识库",
+    "get_role_permissions": "查询角色权限",
+    "check_user_permission": "判断用户是否具备某权限",
     "change_user_status": "启用/停用用户账号",
     "unlock_user_account": "解除账号锁定",
     "force_logout_user": "强制下线",

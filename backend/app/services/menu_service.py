@@ -287,6 +287,20 @@ def menu_list_by_role_id(db: Session, role_id: int, menu_check_strictly: bool) -
     return [i for i in checked_ids if i not in parent_ids_of_checked]
 
 
+def list_role_perms(db: Session, role_id: int) -> list[str]:
+    """
+    角色已授权、且菜单状态正常的权限字符（去重排序）。与登录时加载权限的规则一致
+    （login_service.build_login_user：停用的菜单不带来权限，perms 可以逗号分隔多个）
+    """
+    rows = (
+        db.query(SysMenu.perms)
+        .join(SysRoleMenu, SysRoleMenu.menu_id == SysMenu.menu_id)
+        .filter(SysRoleMenu.role_id == role_id, SysMenu.status == STATUS_NORMAL)
+        .all()
+    )
+    return sorted({p for (perm,) in rows if perm for p in perm.split(",") if p})
+
+
 def role_menu_treeselect(db: Session, is_admin: bool, user_id: int, role_id: int, menu_check_strictly: bool) -> dict:
     return {
         "checkedKeys": menu_list_by_role_id(db, role_id, menu_check_strictly),

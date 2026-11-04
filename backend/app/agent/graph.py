@@ -1,11 +1,13 @@
 """
 StateGraph 定义：
 
-    START -> agent -(无工具调用)----------------------------------> END
+    START -> agent -(无工具调用)--------------------------------------> END
                   \\-(含只读调用)-> tools ---------------------------> agent
                   \\-(只有写调用)-> propose -(生成了 action)-> approval -> execute -> agent
                                            \\-(全部被拒绝)-------------------------> agent
     tools / propose 发现重复调用或连续无进展时，追加结束说明后直接 -> END（循环保护）
+
+最终回复不经过任何"引用修复"：没有合法引用就保持 uncited，检索到的分块只作为 references 显示（见 citations.py）。
 
 节点里不持有 db / login_user：登录态和模型从 runtime.context 取（不落盘），数据库每次临时开 Session。
 """
@@ -23,7 +25,11 @@ from app.agent.checkpointer import get_checkpointer
 from app.agent.context import AgentContext
 from app.agent.serialization import tool_error
 from app.agent.state import AgentState
-from app.core.constants import AGENT_MAX_MODEL_STEPS, AGENT_MAX_STALL_ROUNDS, AGENT_MODEL_TIMEOUT_SECONDS
+from app.core.constants import (
+    AGENT_MAX_MODEL_STEPS,
+    AGENT_MAX_STALL_ROUNDS,
+    AGENT_MODEL_TIMEOUT_SECONDS,
+)
 
 MSG_STEP_LIMIT = "本次问题的处理步数已达上限，请缩小问题范围后重新提问。"
 MSG_TIME_LIMIT = "本次处理时间已达上限，请稍后继续提问。"
@@ -33,7 +39,7 @@ class ModelCallError(RuntimeError):
     """
     模型调用失败的脱敏异常。第三方 SDK 的异常信息可能带有部分 Key、请求头、上游返回的原文，
     而 LangGraph 会把节点异常的 repr 写进 checkpoint，logger.exception 也会打印异常链，
-    所以只保留异常类型和 HTTP 状态码，并用 from None 切断原异常链。
+    所以只保留异常类型和 HTTP 状态码，并在 except 块之外抛出，不挂原异常（__cause__、__context__ 都为空）。
     """
 
 
@@ -50,20 +56,24 @@ def agent_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
         # 不再调用模型，直接给出固定回复结束本轮，防止"查询 -> 再查询"无限循环
         return {"messages": [AIMessage(content=MSG_STEP_LIMIT)]}
     if ctx.deadline and time.monotonic() + AGENT_MODEL_TIMEOUT_SECONDS > ctx.deadline:
-        # 剩余时间不够一次模型调用：停止，保证整次运行在运行锁过期前结束
+        # 剩余时间不够一个模型超时：不再调用模型，尽量让运行在运行锁过期前结束（软时限，见 constants）
         return {"messages": [AIMessage(content=MSG_TIME_LIMIT)]}
 
-    schemas = policy.bindable_tool_schemas(ctx.login_user)
+    schemas = policy.bindable_tool_schemas(ctx.login_user, ctx.tool_names)
     model = ctx.model.bind_tools(schemas) if schemas else ctx.model
     # 系统提示词每次拼在最前面，不写进 state：避免 checkpoint 里存多份，也方便以后修改提示词。
     # 能力边界按本次运行的登录态生成（可信的服务端上下文），权限变化后下一次运行立即生效
     boundary = policy.capability_boundary(ctx.login_user)
     system = policy.SYSTEM_PROMPT + ("\n\n" + boundary if boundary else "")
     prompt = [SystemMessage(content=system), *policy.trim_history(state["messages"])]
+    error = ""
     try:
         response = model.invoke(prompt)
     except Exception as exc:
-        raise ModelCallError(_describe_model_error(exc)) from None
+        error = _describe_model_error(exc)
+    # 在 except 块外抛出：from None 只是不显示原异常，__context__ 里仍会挂着 SDK 异常（可能带 Key）
+    if error:
+        raise ModelCallError(error)
     return {"messages": [response], "step_count": step_count + 1}
 
 
@@ -98,7 +108,8 @@ def _stop(ctx: AgentContext) -> AIMessage:
 def tools_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
     last = state["messages"][-1]
     repeated, keys = _repeated_ids(last.tool_calls, set(state.get("call_keys") or []))
-    results = policy.handle_tool_calls(runtime.context.login_user, last, skip_ids=repeated)
+    results = policy.handle_tool_calls(runtime.context.login_user, last, skip_ids=repeated,
+                                       allowed=runtime.context.tool_names)
 
     # 有进展 = 拿到了本轮之前没见过的结果（参数不同但结果相同，例如连续空结果，也算没有进展）
     seen_hashes = set(state.get("result_hashes") or [])

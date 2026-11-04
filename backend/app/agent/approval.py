@@ -22,6 +22,7 @@ from app.agent.policy import (
     MSG_ONE_WRITE_AT_A_TIME,
     MSG_TOO_MANY_CALLS,
     MSG_UNKNOWN_TOOL,
+    allowed_by_run,
     error_message,
     is_write_call,
     msg_no_permission,
@@ -70,6 +71,9 @@ MSG_EXECUTE_FAILED = "执行失败"
 def _propose_one(ctx: AgentContext, conversation_id: str, call: dict) -> tuple[ToolMessage | None, str | None]:
     call_id, name = call["id"], call["name"]
     spec = TOOLS[name]
+    if not allowed_by_run(name, ctx.tool_names):
+        # 本次运行不允许这个写工具（白名单只收窄）：按未知工具拒绝，不生成审批
+        return error_message(call_id, name, MSG_UNKNOWN_TOOL), None
     try:
         scoped_user = check_perm(ctx.login_user, spec.perm)
     except ServiceException:

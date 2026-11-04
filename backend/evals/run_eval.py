@@ -4,6 +4,7 @@
     cd backend
     python -m evals.run_eval                      # 三种方案、全部用例、各跑 1 次
     python -m evals.run_eval --runs 3 --variants full B --cases W1 S1
+    python -m evals.run_eval --runs 3 --variants B --cases S1 S2 S6 --note "补充运行：……"
 
 结果写到 evals/results/<时间>/：traces.json（原始轨迹）、scored.json（逐条评分）、report.md（报告）。
 results 目录不提交：轨迹里有模型原文，体积大，且每次运行都不同。
@@ -24,6 +25,8 @@ def _set_test_environment(out_dir: Path) -> None:
     os.environ["MYSQL_DATABASE"] = "ry-vue-test"
     os.environ["REDIS_DB"] = "1"
     os.environ["AGENT_CHECKPOINT_PATH"] = str(out_dir / "checkpoints.sqlite")
+    # 知识库索引也放进本次运行目录：评估建索引、清理旧构建时绝不能碰开发环境的 data/knowledge_index
+    os.environ["KNOWLEDGE_INDEX_PATH"] = str(out_dir / "knowledge_index")
 
 
 def _git_commit() -> str:
@@ -43,6 +46,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--variants", nargs="+", default=["A", "B", "full"], choices=["A", "B", "full"])
     parser.add_argument("--cases", nargs="+", help="只运行这些用例 id")
     parser.add_argument("--runs", type=int, default=1)
+    # 部分用例 / 部分方案的补充运行必须在报告里写明，避免被当成一次完整评估
+    parser.add_argument("--note", default="", help="写进报告的运行说明，例如补充运行的原因和范围")
     args = parser.parse_args(argv)
 
     out_dir = RESULTS_DIR / datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -90,6 +95,8 @@ def main(argv: list[str] | None = None) -> None:
         model=settings.agent_model,
         model_ids="、".join(sorted({n for t in traces for n in t.get("model_names", [])})) or "未返回",
         commit=commit, dataset_version=dataset_version(),
+        run_note=args.note or ("完整评估" if not args.cases and len(variants) == len(VARIANTS)
+                               else "部分运行：只包含上面列出的方案和用例"),
         sample_size=f"每个方案 {len(cases)} 条 × {args.runs} 次 = {len(cases) * args.runs} 次，共 {len(traces)} 次",
         case_count=len(cases), runs=args.runs,
         variants="、".join(report.VARIANT_NAMES[v] for v in variants),

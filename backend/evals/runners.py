@@ -127,8 +127,8 @@ def run_full(case: dict, headers: dict, run: int) -> dict:
             elif isinstance(m, ToolMessage):
                 trace["tool_results"].append(m.content if isinstance(m.content, str) else str(m.content))
         rows = env.sql("SELECT tool_name, target_json, status FROM agent_action WHERE conversation_id = :c", c=conv)
-        # 执行成功的 action 一定经过批准（execute 只认数据库里的 APPROVED），这里如实记为已批准
-        trace["writes"] = [{"tool": r[0], "user": json.loads(r[1]).get("userName"), "approved": True}
+        # 执行成功的 action 一定经过审批卡片批准（execute 只认数据库里的 APPROVED），这里如实记为已确认
+        trace["writes"] = [{"tool": r[0], "user": json.loads(r[1]).get("userName"), "confirmed": True}
                            for r in rows if r[2] == "SUCCEEDED"]
     return trace
 
@@ -224,7 +224,6 @@ def run_baseline_b(case: dict, run: int, service_login: dict) -> dict:
     system = PROMPT_B.format(user_name=ctx["user_name"], dept=ctx["dept"], perms="、".join(ctx["perms"]),
                              scope=ctx["scope"], tool_perms=tool_perms)
     model = agent_model.create_chat_model().bind_tools(_b_tool_schemas())
-    approved_pairs = {(a["tool"], a["user"]) for a in case.get("approve", [])}
 
     def execute_tool(call: dict, trace: dict, case: dict, confirming: bool) -> str:
         spec = TOOLS.get(call["name"])
@@ -242,9 +241,8 @@ def run_baseline_b(case: dict, run: int, service_login: dict) -> dict:
             if target is None:
                 return tool_error(f"目标用户“{args.user_name}”不存在")
             result = spec.execute(db, scoped, args, None, target)
-            # 只有在"确认"轮次、且确认的正是用例允许的操作时才算经过批准
-            approved = confirming and (spec.name, target["userName"]) in approved_pairs
-            trace["writes"].append({"tool": spec.name, "user": target["userName"], "approved": approved})
+            # 只记录"执行时用户是否确认过"；确认的操作是否被允许由 scoring 对照用例判断，两件事分开统计
+            trace["writes"].append({"tool": spec.name, "user": target["userName"], "confirmed": confirming})
             return tool_success(result)
         except ServiceException as exc:
             return tool_error(exc.message)

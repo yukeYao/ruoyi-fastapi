@@ -22,6 +22,8 @@ python scripts/init_db.py      # 建库 ry-vue 并导入若依 SQL（会覆盖�
 pytest -q                      # 全部测试（需要本机 MySQL 和 Redis 在运行）
 pytest -q tests/test_stage2_login.py   # 单个文件
 python -m evals.run_eval --runs 3      # 智能助手评估：调用真实模型，只能手动运行
+python scripts/build_knowledge_index.py --fake   # 构建知识库索引（--fake 不联网；不加则用 .env 里的 Embedding）
+python -m evals.rag.run --plan         # 知识库评估的规模与费用估算（不调用 API）；--stage 才会真实运行
 ```
 
 测试会自动使用独立的测试库 `ry-vue-test` 和 Redis db 1，不会影响开发数据。
@@ -35,8 +37,9 @@ python -m evals.run_eval --runs 3      # 智能助手评估：调用真实模型
 | `app/models/` | ORM 模型，一表一文件 | Domain + Mapper |
 | `app/schemas/` | Pydantic 入参模型，继承 `CamelModel` | 请求体 |
 | `app/core/` | 与业务无关的基础设施 | common / framework |
-| `app/agent/` | 智能助手：工具规格、权限策略、审批、LangGraph 图 | — |
-| `evals/` | 智能助手评估（数据集、运行器、评分、报告模板） | — |
+| `app/agent/` | 智能助手：工具规格、权限策略、审批、LangGraph 图、引用校验 | — |
+| `app/rag/` | 知识库：文档解析与分块、Embedding、faiss 索引文件、分词、BM25、RRF | — |
+| `evals/` | 智能助手评估（数据集、运行器、评分、报告模板）；`evals/rag/` 是知识库评估 | — |
 
 ## 编码规则（违反任何一条都会导致前端出错或安全问题）
 
@@ -74,7 +77,10 @@ python -m evals.run_eval --runs 3      # 智能助手评估：调用真实模型
 9. **日志与异常**：模型异常经 `ModelCallError` 脱敏后再抛出；日志里不能出现 Key、JWT、tokenId。
 10. **前端**：只允许 `views/agent/chat/index.vue` 和 `api/agent/chat.js`；内容一律纯文本渲染（不用 v-html，不渲染 Markdown）。
 11. **能力边界与循环保护**：缺少的能力由 `policy.capability_boundary` 从工具注册表生成，拼进本次运行的系统上下文，不写进 state；无权限的工具仍不绑定。循环保护（`graph.tools_node` / `propose_node`）只决定"何时停止"，不能用来放宽权限或审批，也不能推断用户意图替换写操作。
-12. **测试**：pytest 用 `ScriptedChatModel`（`scripted_model` fixture），不得调用真实模型，也不需要 Key。
+12. **知识库**：文档在 `docs/knowledge/*.md`（frontmatter 的 required_perms 需全部满足）。权限过滤必须在检索之前完成；
+    来源只由服务端按本轮 search_knowledge 结果生成（`agent/citations.py`），只表示"内容来自本轮检索"，不代表事实已核验。
+    `AgentContext.tool_names` 和 `KNOWLEDGE_RETRIEVAL_MODE` 只用于评估对照，只能收窄、不能放宽权限。
+13. **测试**：pytest 用 `ScriptedChatModel`（`scripted_model` fixture）和 `FakeEmbeddingModel`，不得调用真实模型或 Embedding，也不需要 Key。
     行为测试检查数据库、Redis、checkpoint 的真实状态，不检查提示词文字。真实模型只在 `evals/` 和手动冒烟中使用，且只连测试库。
 
 ## 工作流程
@@ -96,4 +102,4 @@ python -m evals.run_eval --runs 3      # 智能助手评估：调用真实模型
 
 已修复（回归测试见 `tests/test_known_issues_fix.py`）：在线用户列表改用 `SCAN`；`check_user_data_scope` 改为按 ID 直接查询。
 
-智能助手的已知局限见 `docs/agent-design.md` 第 7 节。
+智能助手的已知局限见 `docs/agent-design.md` 第 8 节。

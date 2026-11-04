@@ -120,6 +120,14 @@ def check_email_unique(db: Session, email: str, user_id: int | None = None) -> b
     return existing is None or existing.user_id == user_id
 
 
+def find_users_by_name(db: Session, user_name: str, limit: int = 2) -> list[SysUser]:
+    """
+    按登录账号精确查找未删除的用户（智能助手按账号解析目标用）。最多取 limit 条：
+    sys_user.user_name 没有唯一索引，只靠应用层校验，调用方要处理"匹配到多个"。不做数据范围校验
+    """
+    return db.query(SysUser).filter(SysUser.user_name == user_name, SysUser.del_flag == DEL_FLAG_NORMAL).limit(limit).all()
+
+
 def get_user_detail(db: Session, login_user: dict, user_id: int | None) -> dict:
     """对应 SysUserController.getInfo：userId 为空时是"新增"表单，否则是"编辑"表单"""
     result: dict = {}

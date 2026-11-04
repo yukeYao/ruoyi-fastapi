@@ -50,6 +50,7 @@ def test_stream_read_only_query(scripted_model):
 
     assert names[-1] == "final" and "error" not in names and "approval" not in names
     steps = [d for e, d in events if e == "step"]
+    # 引用修复节点已移除：最终回复之后不再有任何节点
     assert [s["node"] for s in steps] == ["agent", "tools", "agent"]
     assert steps[0]["messages"][0]["toolCalls"][0]["name"] == "list_roles"
     assert steps[1]["messages"][0]["toolCallId"] == "r1"

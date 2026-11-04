@@ -1,6 +1,5 @@
 """智能助手工具与策略：读写混合、非法调用、上限、结果白名单与脱敏、聚合统计"""
 import json
-import time
 from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
@@ -10,6 +9,7 @@ from sqlalchemy import text
 from app.agent import policy
 from app.agent.graph import MSG_STEP_LIMIT
 from app.agent.serialization import mask_email, mask_phone, tool_success
+from app.core.oper_log import flush_oper_log_for_test
 from app.core.constants import (
     LOGIN_TOKEN_KEY_PREFIX,
     AGENT_MAX_MODEL_STEPS,
@@ -140,10 +140,8 @@ def test_oper_logs_only_summary(scripted_model):
     admin = auth_headers(client)
     client.put("/system/user/changeStatus", headers=admin, json={"userId": 2, "status": "0"})
     c = call("search_oper_logs", {"title": "用户管理"})
-    # @log 用线程池异步落库，先等日志出现再让 Agent 查（直接轮询对话接口会触发频率限制）
-    deadline = time.time() + 3
-    while time.time() < deadline and not client.get("/monitor/operlog/list", headers=admin, params={"title": "用户管理"}).json()["total"]:
-        time.sleep(0.1)
+    # @log 用线程池异步落库，先等日志写完再让 Agent 查
+    flush_oper_log_for_test()
     scripted_model(tool_msg(c), final())
     body = chat(client, admin, "查操作日志")
     rows = _content(tool_results(body)[c["id"]])["untrusted_data"]["rows"]

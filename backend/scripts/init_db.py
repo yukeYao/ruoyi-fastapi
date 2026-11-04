@@ -1,5 +1,5 @@
 """
-初始化数据库：创建 `ry-vue`（utf8mb4），导入 sql/ry_20260417.sql，再导入智能助手的 sql/agent.sql。
+初始化数据库：创建 `ry-vue`（utf8mb4），导入 sql/ry_20260417.sql，再导入智能助手的 sql/agent.sql、sql/knowledge.sql。
 
 不依赖本机 `mysql` 命令行（PATH 里没有），纯用 PyMySQL 执行。
 用法：在 backend/ 目录下运行 `.venv/Scripts/python.exe scripts/init_db.py`
@@ -19,6 +19,8 @@ SQL_DIR = Path(__file__).resolve().parent.parent / "sql"
 SQL_FILE = SQL_DIR / "ry_20260417.sql"
 # 若依脚本会 drop 重建 sys_menu/sys_role_menu，Agent 的菜单必须在它之后导入
 AGENT_SQL_FILE = SQL_DIR / "agent.sql"
+# 知识库表（不依赖若依的表，顺序无要求）
+KNOWLEDGE_SQL_FILE = SQL_DIR / "knowledge.sql"
 
 
 def create_database_if_not_exists() -> None:
@@ -86,9 +88,26 @@ def remove_agent_checkpoint_files() -> None:
             print(f"已删除 checkpoint 文件 {path}")
 
 
+def remove_knowledge_index_files() -> None:
+    """
+    knowledge.sql 会清空"当前生效索引"那一行，旧的索引文件就和库对不上了，一并删除，之后重新运行
+    scripts/build_knowledge_index.py。只删 settings.knowledge_index_dir 目录下本项目生成的 index-* 文件。
+    只在手动执行本脚本时调用：conftest 也会 import 本模块，但测试用临时索引目录，且从不调用这个函数。
+    """
+    base = settings.knowledge_index_dir
+    if not base.is_dir():
+        return
+    for path in base.glob("index-*"):
+        if path.is_file():
+            path.unlink()
+            print(f"已删除知识库索引文件 {path}")
+
+
 if __name__ == "__main__":
     create_database_if_not_exists()
     import_sql_file()
     import_sql_file(AGENT_SQL_FILE)
+    import_sql_file(KNOWLEDGE_SQL_FILE)
     remove_agent_checkpoint_files()
+    remove_knowledge_index_files()
     print("数据库初始化完成")

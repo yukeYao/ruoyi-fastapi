@@ -90,11 +90,13 @@ AGENT_CHAT_PERM = "agent:chat:use"
 # Redis key：每用户单运行锁、请求频率限制
 AGENT_RUN_LOCK_KEY_PREFIX = "agent_run_lock:"
 AGENT_RATE_LIMIT_KEY_PREFIX = "agent_rate_limit:"
-# 单次运行（一次对话或一次审批恢复）的总时限（秒）：每次调用模型前检查剩余时间，
-# 剩余时间不足一次模型调用的超时就停止，保证整次运行一定在时限内结束
+# 单次运行（一次对话或一次审批恢复）的软时限（秒）：只在每次调用模型前检查剩余时间，
+# 剩余时间不足一个模型超时就不再调用模型。它不是硬上限：工具和 execute 节点的耗时、
+# SSE 客户端读得慢都不受它约束，模型超时本身也不是单次调用的总时长（见 AGENT_MODEL_TIMEOUT_SECONDS）
 AGENT_RUN_DEADLINE_SECONDS = 180
-# 运行锁的过期时间（秒）：兜底防止进程崩溃后锁永远不释放。必须大于"运行时限 + 一次模型调用超时"，
-# 否则锁可能在运行还没结束时过期，同一用户就能并发跑第二个运行（测试里有断言）
+# 运行锁的过期时间（秒）：兜底防止进程崩溃后锁永远不释放。设成大于"运行时限 + 一次模型调用超时"，
+# 让正常运行在锁过期前结束的概率很高（测试里有断言），但不能保证：上面列出的耗时都不受时限约束。
+# 锁真的提前过期时，靠 agent_action 的条件 UPDATE 保证写操作最多执行一次
 AGENT_RUN_LOCK_SECONDS = 300
 # 频率限制：每个窗口（秒）内每用户最多请求次数
 AGENT_RATE_LIMIT_WINDOW_SECONDS = 60
@@ -117,7 +119,8 @@ AGENT_MAX_HISTORY_CHARS = 24000
 AGENT_MAX_INPUT_CHARS = 2000
 # 会话标题取首条消息的前若干字
 AGENT_TITLE_CHARS = 30
-# 模型调用超时（秒）；不自动重试，所以这也是单次模型调用的最长耗时
+# 模型调用超时（秒），传给 OpenAI SDK（httpx）：分别限制连接、读、写等单个网络操作，不是一次调用的总时长——
+# 流式返回时每收到一个片段就重新计时，持续慢速输出的调用可以超过它。不自动重试，失败不会再叠加一次超时
 AGENT_MODEL_TIMEOUT_SECONDS = 30
 
 # 写操作审批（agent_action）
@@ -135,3 +138,26 @@ DECISION_REJECT = "reject"
 DECISION_EXPIRE = "expire"
 # 操作日志里标记"来源是智能助手"：写在 sys_oper_log.method 字段前缀
 AGENT_OPER_LOG_SOURCE = "智能助手"
+
+# ---------- 智能助手知识库（RAG）----------
+# 分块与索引规则的版本：改了分块规则、Embedding 输入格式或索引结构就要改它，构建脚本会强制全部重算向量；
+# 读取方发现生效索引的版本与代码不一致时安全失败（不能用旧规则的索引回答）
+KNOWLEDGE_INDEX_VERSION = "v1"
+# 单个分块的最大字符数：章节超过时按段落、再按行切开
+KNOWLEDGE_CHUNK_MAX_CHARS = 600
+# 用户问题发送给 Embedding 服务前的长度上限（字符）：超出直接拒绝，不截断后发送
+KNOWLEDGE_MAX_QUERY_CHARS = 200
+# 一次 Embedding 请求最多带多少段文本
+KNOWLEDGE_EMBED_BATCH_SIZE = 32
+# Embedding 调用超时（秒），与对话模型一样不自动重试
+KNOWLEDGE_EMBED_TIMEOUT_SECONDS = 20
+# 发布新索引后保留的旧索引文件份数：读取方可能刚读到旧的 build_id，正在加载旧文件
+KNOWLEDGE_KEEP_OLD_BUILDS = 1
+# 检索：默认返回条数 / 最多返回条数 / 每路检索的候选数 / RRF 常数（k=60 是 RRF 原论文的取值）
+KNOWLEDGE_TOP_K = 4
+KNOWLEDGE_MAX_TOP_K = 5
+KNOWLEDGE_CANDIDATES = 20
+KNOWLEDGE_RRF_K = 60
+# 返回内容的上限：单个片段字符数、全部片段总字符数（再加上外层字段仍在 AGENT_MAX_TOOL_RESULT_CHARS 以内）
+KNOWLEDGE_MAX_SNIPPET_CHARS = 600
+KNOWLEDGE_MAX_TOTAL_CHARS = 2400

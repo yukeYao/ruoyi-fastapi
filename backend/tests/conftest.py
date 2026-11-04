@@ -7,6 +7,7 @@ pytest 全局夹具：所有测试都连接独立的测试库 `ry-vue-test` 和 
 """
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -15,11 +16,14 @@ os.environ["MYSQL_DATABASE"] = "ry-vue-test"
 os.environ["REDIS_DB"] = "1"
 # 测试不调用真实模型：清掉可能来自 .env 的配置，Agent 测试用 ScriptedChatModel 显式注入
 os.environ["AGENT_API_KEY"] = ""
+os.environ["AGENT_EMBEDDING_API_KEY"] = ""
+# 知识库索引一律放临时目录：测试会构建、删除、篡改索引文件，绝不能碰开发环境的 backend/data/knowledge_index
+os.environ["KNOWLEDGE_INDEX_PATH"] = tempfile.mkdtemp(prefix="ruoyi-test-knowledge-")
 
 import pymysql
 import pytest
 
-from scripts.init_db import AGENT_SQL_FILE, create_database_if_not_exists, import_sql_file
+from scripts.init_db import AGENT_SQL_FILE, KNOWLEDGE_SQL_FILE, create_database_if_not_exists, import_sql_file
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -30,6 +34,9 @@ def init_test_database():
     # 连续导入两次，验证 agent.sql 可重复执行（drop 重建，每次测试会话都从空表开始）
     import_sql_file(AGENT_SQL_FILE)
     import_sql_file(AGENT_SQL_FILE)
+    # 同样连续导入两次，验证 knowledge.sql 可重复执行
+    import_sql_file(KNOWLEDGE_SQL_FILE)
+    import_sql_file(KNOWLEDGE_SQL_FILE)
     yield
 
 

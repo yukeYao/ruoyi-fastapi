@@ -89,8 +89,8 @@ python -m venv .venv
 .venv\Scripts\python.exe scripts\init_db.py
 ```
 
-会自动创建 `ry-vue` 数据库（utf8mb4），导入 `sql/ry_20260417.sql` 和智能助手的 `sql/agent.sql`，
-并删除旧的智能助手会话文件（`data/agent_checkpoints.sqlite*`）。**会覆盖开发数据**；
+会自动创建 `ry-vue` 数据库（utf8mb4），导入 `sql/ry_20260417.sql` 和智能助手的 `sql/agent.sql`、`sql/knowledge.sql`，
+并删除旧的智能助手会话文件（`data/agent_checkpoints.sqlite*`）和知识库索引文件（`data/knowledge_index/index-*`）。**会覆盖开发数据**；
 已有开发数据、只想加上智能助手时，单独导入 `sql/agent.sql` 即可。也可以用 Navicat 手动导入这些 SQL。
 
 ### 4. 启动后端
@@ -154,6 +154,36 @@ AGENT_BASE_URL=https://api.openai.com/v1   # 可选，OpenAI 兼容服务的地�
 ```
 
 未配置模型时，智能助手接口返回"未配置模型"，其他功能不受影响。pytest 用脚本化的假模型，不需要 Key、不调用真实模型。
+
+### 知识库（RAG，开发中）
+
+智能助手的系统规则、权限配置、操作步骤类知识放在 `docs/knowledge/*.md`（每篇用 frontmatter 声明 `doc_id`、`title`、
+`version`、`required_perms`、`sources`；`required_perms` 需全部满足，为空表示所有智能助手用户可读）。
+元数据存在 `sql/knowledge.sql` 的三张表里，向量索引是本地 faiss 文件（`backend/data/knowledge_index/`，不提交）。
+
+```powershell
+cd backend
+.venv\Scripts\python.exe scripts\build_knowledge_index.py          # 增量构建：内容没变就不重新计算 Embedding
+.venv\Scripts\python.exe scripts\build_knowledge_index.py --fake   # 本地调试用假 Embedding，不联网
+```
+
+Embedding 配置（`backend/.env`）：`AGENT_EMBEDDING_MODEL`、`AGENT_EMBEDDING_API_KEY`、`AGENT_EMBEDDING_BASE_URL`。
+**知识文档内容（构建时）和用户的提问（检索时）会发送到配置的 Embedding 服务**；提问超过 200 字直接拒绝，
+普通日志不记录提问原文。索引缺失、版本不一致或 Embedding 失败时知识库安全失败，不影响其他功能。
+pytest 只用假 Embedding 和临时索引目录，不需要 Key，也不会动开发环境的索引。
+
+回答里的知识库来源由服务端生成，只接受本轮 `search_knowledge` 实际返回的分块。**来源只表示内容来自本轮检索，
+不代表回答已被验证为真**：服务端能校验"引用的分块确实检索到过"，不能校验"回复的句子忠实于分块"。
+模型没写合法引用时，回复标为"未引用知识库来源"，检索到的片段只作为"未被引用的参考资料"显示，服务端不替模型补引用；
+追问时沿用上一轮的 chunkId 同样判为无效引用。
+
+知识库评估（会调用真实模型和 Embedding，手动运行；方法见 [docs/rag-eval-report.md](docs/rag-eval-report.md)）：
+
+```powershell
+cd backend
+.venv\Scripts\python.exe -m evals.rag.run --plan                # 只打印规模和费用估算，不调用 API
+.venv\Scripts\python.exe -m evals.rag.run --stage all --runs 3   # 检索评估（冻结的 dev 校准门槛，hold-out 报告）+ 端到端（默认只跑混合检索 + 业务工具）
+```
 
 评估（会调用真实模型，手动运行）：
 
