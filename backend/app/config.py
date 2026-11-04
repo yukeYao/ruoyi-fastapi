@@ -50,6 +50,12 @@ class Settings(BaseSettings):
     # 本地 faiss 索引目录，相对路径按 backend/ 解析；backend/data/ 已加入 .gitignore。
     # pytest 在 conftest 里改成临时目录，绝不读写开发索引
     knowledge_index_path: str = "data/knowledge_index"
+    # 混合检索的最低相关性门槛：分块至少满足一项才会返回——
+    #   向量余弦相似度 >= τv，或（BM25 分数 >= τb 且命中的不同查询词 >= 最少命中词数）。
+    # 当前是未校准的初始值；阶段 4 只在评估开发集上校准，在独立测试集上报告，不能用同一批样本调参和汇报
+    knowledge_min_vector_score: float = 0.45
+    knowledge_min_bm25_score: float = 1.5
+    knowledge_min_bm25_terms: int = 2
 
     @property
     def sqlalchemy_database_uri(self) -> str:

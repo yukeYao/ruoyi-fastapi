@@ -13,6 +13,11 @@
 build_id 变化时重新加载；版本、模型、向量数、摘要任何一项对不上都安全失败，抛 KnowledgeIndexUnavailable，
 由调用方转成工具错误，不影响其他业务工具。
 
+检索（search_knowledge）：权限过滤在检索之前——先按当前用户的权限确定可读分块集合，
+BM25 只在可读集合上建（IDF 等统计量也只来自可读集合），向量检索用 IDSelectorBatch 只在可读向量里找；
+两路结果 RRF 合并后过相关性门槛和限额。Embedding 不可用时降级为只用 BM25，并在结果里附服务端生成的说明。
+权限不足和内容不存在得到完全相同的结果：结果只取决于可读集合，空结果的说明也是同一句。
+
 本模块只读写知识库自己的三张表和索引文件，不涉及任何业务数据。
 """
 import json
@@ -27,14 +32,28 @@ import numpy as np
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.core.constants import KNOWLEDGE_INDEX_VERSION, KNOWLEDGE_KEEP_OLD_BUILDS
+from app.core.constants import (
+    KNOWLEDGE_CANDIDATES,
+    KNOWLEDGE_INDEX_VERSION,
+    KNOWLEDGE_KEEP_OLD_BUILDS,
+    KNOWLEDGE_MAX_SNIPPET_CHARS,
+    KNOWLEDGE_MAX_TOP_K,
+    KNOWLEDGE_MAX_TOTAL_CHARS,
+    KNOWLEDGE_RRF_K,
+    KNOWLEDGE_TOP_K,
+)
+from app.core.deps import user_has_perm
+from app.core.exceptions import ServiceException
 from app.models.agent_knowledge_chunk import AgentKnowledgeChunk
 from app.models.agent_knowledge_doc import AgentKnowledgeDoc
 from app.models.agent_knowledge_index import AgentKnowledgeIndex
-from app.rag import index_store
+from app.rag import embedding, index_store, retriever
+from app.rag.bm25 import BM25
 from app.rag.documents import KnowledgeChunk, KnowledgeDoc, perms_to_json, sha256
-from app.rag.embedding import EmbeddingModel
+from app.rag.embedding import EmbeddingModel, QueryTooLongError
 from app.rag.index_store import IndexFileError, IndexManifest, LoadedIndex
+from app.rag.retriever import Candidate, Thresholds
+from app.rag.tokenizer import tokenize
 
 logger = logging.getLogger("ruoyi.agent.knowledge")
 
@@ -43,7 +62,16 @@ INDEX_ROW_ID = 1
 MSG_INDEX_UNAVAILABLE = "知识库索引不可用，请联系管理员重新构建索引"
 
 
-class KnowledgeIndexUnavailable(RuntimeError):
+MSG_EMPTY_QUERY = "问题不能为空"
+# 下面两句是服务端生成、放在工具结果外层的说明（不在 untrusted_data 里）
+NOTE_NO_RESULT = ("知识库中没有找到与问题相关的内容。这不代表系统没有相关规则：可能没有收录，也可能不在你可读的范围内。"
+                  "回答时不能编造规则或引用，应如实说明没有找到依据。")
+NOTE_DEGRADED = "向量检索暂时不可用，本次只使用关键词检索，结果可能不完整。"
+
+
+class KnowledgeIndexUnavailable(ServiceException):
+    """索引不可用：对外只有一句固定文案，reason 只写日志"""
+
     def __init__(self, reason: str):
         super().__init__(MSG_INDEX_UNAVAILABLE)
         self.reason = reason
@@ -256,3 +284,131 @@ def load_active_index(db: Session, index_dir: Path | None = None) -> ActiveIndex
     chunks = tuple(ChunkRecord(r.chunk_id, r.doc_id, r.title, r.section, r.content,
                                tuple(json.loads(r.required_perms)), r.vector_id) for r in rows)
     return ActiveIndex(meta.build_id, meta.embedding_model, loaded, chunks)
+
+
+# ---------------------------------------------------------------------------
+# 检索
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class KnowledgeHit:
+    doc_id: str
+    title: str
+    section: str
+    chunk_id: str
+    snippet: str
+    score: float                 # RRF 分数（相对排名，不是概率）
+    vector_score: float | None   # 余弦相似度；降级或向量检索没召回时为 None
+    bm25_score: float
+
+
+@dataclass(frozen=True)
+class KnowledgeSearchResult:
+    hits: tuple[KnowledgeHit, ...]
+    note: str        # 服务端生成的说明，空字符串表示没有
+    degraded: bool   # 本次是否只用了关键词检索
+
+
+def current_thresholds() -> Thresholds:
+    return Thresholds(settings.knowledge_min_vector_score, settings.knowledge_min_bm25_score,
+                      settings.knowledge_min_bm25_terms)
+
+
+def readable(login_user: dict, chunk: ChunkRecord) -> bool:
+    """required_perms 需全部满足；空表示所有智能助手用户可读。超级管理员（*:*:*）全部可读"""
+    return all(user_has_perm(login_user, p) for p in chunk.required_perms)
+
+
+# 分块分词的缓存：按 (build_id, chunk_id) 惰性填充，只在分块进入某次检索的可读集合时才分词；
+# build_id 变化时整体清空
+_token_lock = threading.Lock()
+_token_cache: dict[tuple[str, str], list[str]] = {}
+
+
+def _chunk_tokens(build_id: str, chunk: ChunkRecord) -> list[str]:
+    key = (build_id, chunk.chunk_id)
+    with _token_lock:
+        if key not in _token_cache:
+            if any(k[0] != build_id for k in _token_cache):
+                _token_cache.clear()
+            # 与 Embedding 输入一致：标题、章节也参与关键词匹配
+            _token_cache[key] = tokenize(f"{chunk.title}\n{chunk.section}\n{chunk.content}")
+        return _token_cache[key]
+
+
+def _bm25_search(build_id: str, allowed: list[ChunkRecord], query_tokens: list[str]) -> list[tuple[ChunkRecord, float, int]]:
+    """只在可读集合上建 BM25；返回得分大于 0 的前 KNOWLEDGE_CANDIDATES 个 (分块, 分数, 命中词数)"""
+    if not allowed or not query_tokens:
+        return []
+    model = BM25([_chunk_tokens(build_id, c) for c in allowed])
+    scored = [(c, s, m) for c, (s, m) in zip(allowed, model.score(query_tokens)) if s > 0]
+    scored.sort(key=lambda x: (-x[1], x[0].chunk_id))
+    return scored[:KNOWLEDGE_CANDIDATES]
+
+
+def _vector_search(active: ActiveIndex, query: str, allowed: list[ChunkRecord]) -> tuple[list[tuple[int, float]], bool]:
+    """
+    返回 ([(vector_id, 余弦相似度)], 是否降级)。即使可读集合为空也先计算问题的向量：
+    否则"有没有可读文档"会体现在是否降级上，权限不足和内容不存在的结果就不完全相同了
+    """
+    try:
+        model = embedding.get_embedding_model()
+        if model.name != active.embedding_model:
+            # 查询和索引不在同一个向量空间，相似度没有意义
+            raise embedding.EmbeddingError("查询所用 Embedding 模型与索引不一致")
+        query_vector = model.embed_query(query)
+        return active.index.search(query_vector, KNOWLEDGE_CANDIDATES, [c.vector_id for c in allowed]), False
+    except Exception as exc:
+        # 只记录异常类型和脱敏后的文案，不记录问题原文
+        detail = str(exc) if isinstance(exc, (embedding.EmbeddingError, IndexFileError)) else ""
+        logger.warning("知识库向量检索不可用，降级为关键词检索：%s %s", type(exc).__name__, detail)
+        return [], True
+
+
+def search_knowledge(db: Session, login_user: dict, query: str, top_k: int = KNOWLEDGE_TOP_K,
+                     thresholds: Thresholds | None = None) -> KnowledgeSearchResult:
+    try:
+        query = embedding.check_query(query)
+    except QueryTooLongError as exc:
+        raise ServiceException(str(exc)) from None
+    if not query:
+        raise ServiceException(MSG_EMPTY_QUERY)
+    top_k = max(1, min(int(top_k), KNOWLEDGE_MAX_TOP_K))
+    thresholds = thresholds or current_thresholds()
+
+    try:
+        active = load_active_index(db)
+    except KnowledgeIndexUnavailable as exc:
+        logger.warning("知识库索引不可用：%s", exc.reason)
+        raise
+
+    # 权限过滤在检索之前：后面两路检索都只接触这个集合
+    allowed = [c for c in active.chunks if readable(login_user, c)]
+    by_id = {c.chunk_id: c for c in allowed}
+    by_vector = {c.vector_id: c for c in allowed}
+
+    bm25_hits = _bm25_search(active.build_id, allowed, tokenize(query))
+    vector_hits, degraded = _vector_search(active, query, allowed)
+    # 防御：向量检索返回了可读集合以外的 ID（不应发生）就丢弃，而不是去分块表里查
+    vector_hits = [(v, s) for v, s in vector_hits if v in by_vector]
+
+    candidates: dict[str, Candidate] = {}
+    for c, score, matched in bm25_hits:
+        candidates[c.chunk_id] = Candidate(c.chunk_id, bm25_score=score, bm25_terms=matched)
+    for vector_id, sim in vector_hits:
+        cid = by_vector[vector_id].chunk_id
+        old = candidates.get(cid, Candidate(cid))
+        candidates[cid] = Candidate(cid, sim, old.bm25_score, old.bm25_terms)
+
+    ranked = retriever.rank(candidates, [by_vector[v].chunk_id for v, _ in vector_hits],
+                            [c.chunk_id for c, _, _ in bm25_hits], thresholds, KNOWLEDGE_RRF_K, top_k)
+    snippets = retriever.clip([by_id[r.chunk_id].content for r in ranked], KNOWLEDGE_MAX_SNIPPET_CHARS,
+                              KNOWLEDGE_MAX_TOTAL_CHARS)
+    hits = tuple(
+        KnowledgeHit(by_id[r.chunk_id].doc_id, by_id[r.chunk_id].title, by_id[r.chunk_id].section, r.chunk_id, text,
+                     round(r.score, 6), None if r.vector_score is None else round(r.vector_score, 4),
+                     round(r.bm25_score, 4))
+        for r, text in zip(ranked, snippets)
+    )
+    notes = ([NOTE_DEGRADED] if degraded else []) + ([] if hits else [NOTE_NO_RESULT])
+    return KnowledgeSearchResult(hits, "".join(notes), degraded)
