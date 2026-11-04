@@ -275,19 +275,21 @@ def main(argv: list[str] | None = None) -> None:
             for run in range(1, args.runs + 1):
                 trace = {"case_id": case["id"], "run": run, "operator": case["operator"], "error": "",
                          "tool_calls": [], "tool_results": [], "model_names": [], "model_calls": 0,
-                         "input_tokens": 0, "output_tokens": 0}
+                         "input_tokens": 0, "output_tokens": 0, "repair_calls": 0}
                 started = time.monotonic()
                 resp = env.client.post("/agent/chat", headers=headers[case["operator"]],
                                        json={"message": case["message"]}).json()
                 trace["latency"] = round(time.monotonic() - started, 2)
                 if resp.get("code") != 200:
                     trace.update(error=f"接口返回 {resp.get('code')}：{resp.get('msg')}", reply="", sources=[],
-                                 invalidCitations=0, knowledgeStatus=None, pendingAction=None)
+                                 invalidCitations=0, knowledgeStatus=None, pendingAction=None, references=[],
+                                 citationRepair=None)
                 else:
                     data = resp["data"]
                     conversations.append(data["conversationId"])
                     trace.update(reply=data["reply"], sources=data["sources"], invalidCitations=data["invalidCitations"],
-                                 knowledgeStatus=data["knowledgeStatus"], pendingAction=data["pendingAction"])
+                                 knowledgeStatus=data["knowledgeStatus"], pendingAction=data["pendingAction"],
+                                 references=data["references"], citationRepair=data["citationRepair"])
                     for m in data["messages"]:
                         if m["type"] == "ai":
                             trace["tool_calls"] += [{"name": c["name"], "args": c["args"]} for c in m["toolCalls"]]
@@ -306,6 +308,13 @@ def main(argv: list[str] | None = None) -> None:
                         tin, tout = _usage(m)
                         trace["input_tokens"] += tin
                         trace["output_tokens"] += tout
+                        # 引用修复调用的用量记在被修复的回复上（graph._repair_record），同样计入步数和 Token
+                        repair = (m.additional_kwargs or {}).get("citation_repair") or {}
+                        if repair.get("model_name"):
+                            trace["model_calls"] += 1
+                            trace["repair_calls"] += 1
+                            trace["input_tokens"] += int(repair.get("input_tokens") or 0)
+                            trace["output_tokens"] += int(repair.get("output_tokens") or 0)
                 trace["victim_status_after"] = env.sql("SELECT status FROM sys_user WHERE user_name = :n AND del_flag = '0'",
                                                        n=VICTIM)[0][0]
                 trace["victim_actions"] = [
@@ -316,7 +325,8 @@ def main(argv: list[str] | None = None) -> None:
                 verdict = "通过" if not trace["failures"] else "未通过：" + "；".join(trace["failures"])
                 print(f"{case['id']} 第{run}次 {verdict}  工具={[c['name'] for c in trace['tool_calls']]} "
                       f"来源={[s['chunkId'] for s in trace['sources']]} 无效引用={trace['invalidCitations']} "
-                      f"状态={trace['knowledgeStatus']} 步数={trace['model_calls']} 耗时={trace['latency']}s "
+                      f"状态={trace['knowledgeStatus']} 引用修复={trace['citationRepair']} "
+                      f"步数={trace['model_calls']}（含修复 {trace['repair_calls']}） 耗时={trace['latency']}s "
                       f"Token={trace['input_tokens']}/{trace['output_tokens']}", flush=True)
 
         summary = {"commit": commit, "model_config": settings.agent_model,
