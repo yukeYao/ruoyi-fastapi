@@ -50,7 +50,8 @@ def test_stream_read_only_query(scripted_model):
 
     assert names[-1] == "final" and "error" not in names and "approval" not in names
     steps = [d for e, d in events if e == "step"]
-    assert [s["node"] for s in steps] == ["agent", "tools", "agent"]
+    # 最后一个 cite 是引用修复节点：没有知识库检索时什么都不做，也不带消息
+    assert [s["node"] for s in steps] == ["agent", "tools", "agent", "cite"] and steps[-1]["messages"] == []
     assert steps[0]["messages"][0]["toolCalls"][0]["name"] == "list_roles"
     assert steps[1]["messages"][0]["toolCallId"] == "r1"
     # 文本按片段推送，拼起来就是最终回复；工具调用参数不会出现在 token 里
@@ -76,7 +77,7 @@ def test_stream_approval_then_approve(scripted_model):
     events = _events(client.post(f"/agent/action/{pending['actionId']}/approve/stream", headers=admin))
     # 恢复时被 interrupt 的 approval 节点先完成（不带消息），再执行 execute，最后模型总结
     steps = [d for e, d in events if e == "step"]
-    assert [s["node"] for s in steps] == ["approval", "execute", "agent"]
+    assert [s["node"] for s in steps] == ["approval", "execute", "agent", "cite"]
     assert steps[0]["messages"] == [] and steps[1]["messages"][0]["toolCallId"] == "w1"
     final_data = events[-1][1]
     assert events[-1][0] == "final"

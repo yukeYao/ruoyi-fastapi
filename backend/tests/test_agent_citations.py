@@ -22,7 +22,7 @@ def test_cited_source_comes_from_tool_result_not_reply():
     messages = [HumanMessage(content="问"), _search_call("c1"), _result("c1", [ROW]),
                 AIMessage(content="答案 [doc-a#01]（标题：伪造的标题）")]
     ann = citations.annotate(messages)[3]
-    assert ann == {"status": "cited", "invalidCitations": 0,
+    assert ann == {"status": "cited", "invalidCitations": 0, "references": [], "citationRepair": None,
                    "sources": [{"chunkId": "doc-a#01", "docId": "doc-a", "title": "标题", "section": "章节"}]}
 
 
@@ -56,7 +56,8 @@ def test_new_turn_resets_valid_set():
 
 def test_not_found_and_uncited_statuses():
     empty = [HumanMessage(content="问"), _search_call("c1"), _result("c1", []), AIMessage(content="没有找到依据")]
-    assert citations.annotate(empty)[3] == {"status": "not_found", "sources": [], "invalidCitations": 0}
+    assert citations.annotate(empty)[3] == {"status": "not_found", "sources": [], "references": [],
+                                            "invalidCitations": 0, "citationRepair": None}
     uncited = [HumanMessage(content="问"), _search_call("c1"), _result("c1", [ROW]), AIMessage(content="不写引用")]
     assert citations.annotate(uncited)[3]["status"] == "uncited"
 
@@ -69,3 +70,37 @@ def test_malformed_chunk_ids_in_rows_are_ignored():
     bad = {**ROW, "chunkId": "<script>#1"}
     messages = [HumanMessage(content="问"), _search_call("c1"), _result("c1", [bad]), AIMessage(content="x")]
     assert citations.annotate(messages)[3]["status"] == "not_found"
+
+
+# ---------------------------------------------------------------------------
+# 引用修复的辅助函数：正文不变，只插入合法的 [chunkId]
+# ---------------------------------------------------------------------------
+
+def test_insert_citations_keeps_text_and_places_before_punctuation():
+    text = "第一句。第二句！\n第三句"
+    out = citations.insert_citations(text, {1: ["a#01"], 3: ["b#02", "c#03"]})
+    assert out == "第一句[a#01]。第二句！\n第三句[b#02][c#03]"
+    assert citations.CITATION_PATTERN.sub("", out) == text
+
+
+def test_split_sentences_round_trip():
+    text = "甲。乙；丙?\n\n丁"
+    assert "".join(citations.split_sentences(text)) == text
+
+
+def test_parse_repair_only_accepts_valid_ids_and_sentence_numbers():
+    raw = json.dumps({"citations": [{"sentence": 1, "chunkIds": ["a#01", "evil#01"]},
+                                    {"sentence": 9, "chunkIds": ["a#01"]},
+                                    {"sentence": "2", "chunkIds": ["a#01"]},
+                                    {"sentence": 2, "chunkIds": "a#01"}]})
+    assert citations.parse_repair(raw, 2, {"a#01"}) == {1: ["a#01"]}
+    assert citations.parse_repair("```json\n" + raw + "\n```", 2, {"a#01"}) == {1: ["a#01"]}
+    assert citations.parse_repair("不是 JSON", 2, {"a#01"}) == {}
+    assert citations.parse_repair(json.dumps([1, 2]), 2, {"a#01"}) == {}
+
+
+def test_repair_status_only_from_known_values():
+    """修复状态是服务端写的展示信息；不认识的值一律当作没有"""
+    msg = AIMessage(content="答 [doc-a#01]", additional_kwargs={citations.REPAIR_KEY: {"status": "whatever"}})
+    messages = [HumanMessage(content="问"), _search_call("c1"), _result("c1", [ROW]), msg]
+    assert citations.annotate(messages)[3]["citationRepair"] is None

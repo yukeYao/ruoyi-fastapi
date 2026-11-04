@@ -127,3 +127,49 @@ def test_plain_user_cannot_retrieve_oper_log_in_bm25_mode(smoke_kb):
 def test_rule_question_retrieves_password_lock_in_bm25_mode(smoke_kb):
     hits = knowledge_service.search_knowledge(smoke_kb, {"user_id": 1, "permissions": ["*:*:*"]}, _message("R1")).hits
     assert hits[0].doc_id == "password-lock"
+
+
+def test_cleanup_physically_deletes_smoke_data_and_redis_keys():
+    """cleanup_smoke_data：smoke_ 用户、角色及关联物理删除，本次登录态和频率限制计数删除（只在测试库上）"""
+    from fastapi.testclient import TestClient
+
+    from app.core.constants import AGENT_RATE_LIMIT_KEY_PREFIX, LOGIN_TOKEN_KEY_PREFIX, LOGIN_USER_KEY
+    from app.core.redis_client import redis_client
+    from app.core.security import decode_jwt_token
+    from evals import environment as env
+    from main import app
+    from tests.agent_helpers import MENU_USER, add_role, add_user
+    from tests.conftest import auth_headers
+
+    client = TestClient(app)
+    admin = auth_headers(client)
+    marks = {"oper": env.sql("SELECT COALESCE(MAX(oper_id), 0) FROM sys_oper_log")[0][0],
+             "login": env.sql("SELECT COALESCE(MAX(info_id), 0) FROM sys_logininfor")[0][0]}
+    role_id = add_role(client, admin, "smoke_cleanup_r", [MENU_USER])
+    user_id = add_user(client, admin, "smoke_cleanup_u", [role_id])
+    # 交给 cleanup_smoke_data 物理删除，不再走 agent_helpers 的逻辑删除
+    from tests import agent_helpers
+    agent_helpers.CREATED_USER_IDS.remove(user_id)
+    agent_helpers.CREATED_ROLE_IDS.remove(role_id)
+    headers = env.login("smoke_cleanup_u", agent_helpers.PASSWORD)
+    token_key = LOGIN_TOKEN_KEY_PREFIX + decode_jwt_token(headers["Authorization"].split(" ", 1)[1])[LOGIN_USER_KEY]
+    redis_client.set(AGENT_RATE_LIMIT_KEY_PREFIX + str(user_id), 3)
+    assert redis_client.exists(token_key)
+
+    rag_smoke.cleanup_smoke_data(env, [user_id], [role_id], [], [headers], {user_id}, marks)
+
+    assert env.sql("SELECT COUNT(*) FROM sys_user WHERE user_id = :i", i=user_id)[0][0] == 0
+    assert env.sql("SELECT COUNT(*) FROM sys_role WHERE role_id = :i", i=role_id)[0][0] == 0
+    assert env.sql("SELECT COUNT(*) FROM sys_user_role WHERE user_id = :i OR role_id = :r", i=user_id, r=role_id)[0][0] == 0
+    assert env.sql("SELECT COUNT(*) FROM sys_role_menu WHERE role_id = :r", r=role_id)[0][0] == 0
+    assert env.sql("SELECT COUNT(*) FROM sys_logininfor WHERE info_id > :m", m=marks["login"])[0][0] == 0
+    assert not redis_client.exists(token_key)
+    assert not redis_client.exists(AGENT_RATE_LIMIT_KEY_PREFIX + str(user_id))
+
+
+def test_cleanup_refuses_non_test_database(monkeypatch):
+    from evals import environment as env
+
+    monkeypatch.setattr(settings, "mysql_database", "ry-vue")
+    with pytest.raises(SystemExit):
+        rag_smoke.cleanup_smoke_data(env, [1], [1], [], [], set(), {})

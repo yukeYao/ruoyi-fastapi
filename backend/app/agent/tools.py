@@ -217,12 +217,17 @@ class SearchKnowledgeArgs(ToolArgs):
     top_k: int = Field(default=KNOWLEDGE_TOP_K, ge=1, le=KNOWLEDGE_MAX_TOP_K, description="返回的片段数")
 
 
+# 检索到内容时附在外层的引用要求。只是提高模型写引用的概率：来源是否成立由服务端校验（agent/citations.py），
+# 没写引用时服务端最多做一次引用修复，都不依赖模型遵守这句话
+NOTE_CITE = "回答用到这些片段时，在对应句子后写上片段的 [chunkId]，例如 [password-lock#01]；只能使用这里返回的 chunkId。"
+
+
 def _search_knowledge(db: Session, login_user: dict, args: SearchKnowledgeArgs) -> ToolOutput:
     # 权限过滤、降级、无结果说明都在 knowledge_service 里完成；这里只换成工具结果的字段名
     result = knowledge_service.search_knowledge(db, login_user, args.query, args.top_k)
     rows = [{"docId": h.doc_id, "title": h.title, "section": h.section, "chunkId": h.chunk_id, "snippet": h.snippet,
              "score": h.score} for h in result.hits]
-    return ToolOutput({"total": len(rows), "rows": rows}, note=result.note)
+    return ToolOutput({"total": len(rows), "rows": rows}, note=result.note + (NOTE_CITE if rows else ""))
 
 
 # 角色的权限字符最多列出这么多个；超出时标记 truncated，并在外层说明列表不完整
@@ -314,10 +319,14 @@ _TOOL_LIST = [
     ToolSpec("list_online_sessions", "查询在线会话", RISK_READ, "monitor:online:list", ListOnlineArgs, _list_online_sessions,
              ("userName", "deptName", "ipaddr", "loginLocation", "browser", "os", "loginTime")),
     # 知识库只读：检索内容是文档数据，放在 untrusted_data；降级、无结果的说明是服务端外层 note
-    ToolSpec("search_knowledge", "检索知识库中的系统规则、权限配置、操作步骤和常见问题（只说明规则，不代表实时数据）",
+    ToolSpec("search_knowledge",
+             "检索知识库中的系统规则、权限配置、操作步骤和常见问题。规则类和排查类问题（例如某账号为什么看不到某菜单）"
+             "先用它获取判定规则，再用业务工具确认实时状态；知识库只说明规则，不代表实时数据",
              RISK_READ, AGENT_CHAT_PERM, SearchKnowledgeArgs, _search_knowledge,
              ("docId", "title", "section", "chunkId", "snippet", "score")),
-    ToolSpec("get_role_permissions", "按角色名称查询角色状态、数据范围和已授权的权限字符（数据库配置，受数据权限限制）",
+    ToolSpec("get_role_permissions",
+             "按角色名称查询角色状态、数据范围和已授权的权限字符（数据库配置，受数据权限限制）。"
+             "判断角色是否具备某个权限时，优先传 perm 参数，由服务端按完整列表判断",
              RISK_READ, "system:role:query", GetRolePermissionsArgs, _get_role_permissions,
              ("roleId", "roleName", "roleKey", "status", "dataScope", "permCount", "perms", "truncated",
               "checkedPerm", "hasPerm")),

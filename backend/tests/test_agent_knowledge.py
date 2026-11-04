@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
-from app.agent.tools import MAX_ROLE_PERMS, MSG_ROLE_UNAVAILABLE
+from app.agent.tools import MAX_ROLE_PERMS, MSG_ROLE_UNAVAILABLE, NOTE_CITE
 from app.config import settings
 from app.core.database import SessionLocal
 from app.models.agent_knowledge_chunk import AgentKnowledgeChunk
@@ -308,7 +308,8 @@ def test_embedding_failure_only_degrades_knowledge(kb, scripted_model, monkeypat
                             call("search_users", {"user_name": "admin"}, "u1")), final("好的"))
     body = chat(client, auth_headers(client), "查一下")
     knowledge, users = _payload(body, "s1"), _payload(body, "u1")
-    assert knowledge["ok"] and knowledge["note"] == knowledge_service.NOTE_DEGRADED
+    # 降级说明 + 检索到内容时的引用要求，都是服务端固定文案
+    assert knowledge["ok"] and knowledge["note"] == knowledge_service.NOTE_DEGRADED + NOTE_CITE
     assert knowledge["untrusted_data"]["rows"]
     assert "APIConnectionError" not in json.dumps(knowledge, ensure_ascii=False)
     assert users["ok"] and users["untrusted_data"]["rows"][0]["userName"] == "admin"

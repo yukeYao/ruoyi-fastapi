@@ -65,6 +65,14 @@
                 <div v-if="item.knowledge.invalidCitations" class="source-warning">
                   回复中有 {{ item.knowledge.invalidCitations }} 处引用不是本轮知识库检索返回的内容，无法核实，未列入来源
                 </div>
+                <!-- 检索到但回复没有引用的片段：与来源分开，明确不是回答依据 -->
+                <template v-if="item.knowledge.references && item.knowledge.references.length">
+                  <div class="references-title">检索到但未被引用的参考资料（不是回答依据）</div>
+                  <div v-for="r in item.knowledge.references" :key="r.chunkId" class="reference-item">
+                    <span>{{ r.title }}</span><span v-if="r.section" class="source-section"> · {{ r.section }}</span>
+                    <span class="source-id">[{{ r.chunkId }}]</span>
+                  </div>
+                </template>
               </div>
 
               <!-- 工具调用 -->
@@ -348,10 +356,12 @@ async function openConversation(id) {
 
 function createStreamHandler() {
   let current = null // 正在接收 token 的模型回复条目
+  let lastAssistant = null // 本次运行最后一条模型回复，final 时用服务端的最终文本覆盖（引用修复会补上 [chunkId]）
   return function onEvent(event, data) {
     if (event === 'token') {
       if (!current) {
         current = push({ kind: 'assistant', text: '', streaming: true })
+        lastAssistant = current
       }
       current.text += data.text
       scrollToBottom()
@@ -369,7 +379,7 @@ function createStreamHandler() {
             }
             current = null
           } else if (m.content) {
-            push({ kind: 'assistant', text: m.content })
+            lastAssistant = push({ kind: 'assistant', text: m.content })
           }
           for (const c of m.toolCalls || []) {
             push({ kind: 'tool_call', name: c.name, args: JSON.stringify(c.args) })
@@ -385,8 +395,16 @@ function createStreamHandler() {
         current.streaming = false
         current = null
       }
-      // 流式过程中的消息不带引用信息；最终回复的来源以 final 里服务端生成的为准
-      pushKnowledge(data.knowledgeStatus ? { status: data.knowledgeStatus, sources: data.sources, invalidCitations: data.invalidCitations } : null)
+      // 流式过程中的消息不带引用信息；最终回复的文本和来源以 final 里服务端生成的为准
+      if (lastAssistant && data.reply) {
+        lastAssistant.text = data.reply
+      }
+      pushKnowledge(data.knowledgeStatus ? {
+        status: data.knowledgeStatus,
+        sources: data.sources,
+        references: data.references,
+        invalidCitations: data.invalidCitations
+      } : null)
       applyResult(data)
     } else if (event === 'error') {
       if (current) {
@@ -583,6 +601,14 @@ onMounted(() => {
     .source-warning {
       margin-top: 4px;
       color: var(--el-color-warning);
+    }
+    .references-title {
+      margin-top: 6px;
+      color: var(--el-text-color-placeholder);
+    }
+    .reference-item {
+      color: var(--el-text-color-placeholder);
+      word-break: break-all;
     }
   }
   .approval-card {

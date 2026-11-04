@@ -274,8 +274,11 @@ def _run_result(db: Session, graph, config: dict, conv_id: str, history_len: int
         "pendingAction": _pending_action_dict(db, snapshot),
         # 最终回复的来源：只来自本轮 search_knowledge 实际返回的分块，模型写的无效引用只计数
         "sources": reply_knowledge["sources"] if reply_knowledge else [],
+        # 本轮检索到、但回复没有引用的分块：不是回答依据，前端与来源分开显示
+        "references": reply_knowledge["references"] if reply_knowledge else [],
         "invalidCitations": reply_knowledge["invalidCitations"] if reply_knowledge else 0,
         "knowledgeStatus": reply_knowledge["status"] if reply_knowledge else None,
+        "citationRepair": reply_knowledge["citationRepair"] if reply_knowledge else None,
     }
 
 
@@ -367,6 +370,7 @@ def prepare_chat(db: Session, login_user: dict, conversation_id: str | None, mes
             "call_keys": [],
             "result_hashes": [],
             "stall_count": 0,
+            "citation_repaired": False,
         }
         return PreparedRun(user_id, lock_token, conv_id, graph, config, ctx, history_len, inputs,
                            settled_messages=settled[history_len:], settled_action_id=settled_action_id)
@@ -517,6 +521,7 @@ def stream_run(run: PreparedRun) -> Iterator[str]:
     以 SSE 推送一次运行的过程。同步生成器：Starlette 在线程池里迭代，图和 service 保持同步写法。
     事件：
     - step：某个节点完成，附带这一步新增的消息（工具调用、工具结果），用于展示工具步骤；
+      cite（引用修复）节点只推送节点名，不带消息；
     - token：模型输出的文本片段（只取 agent 节点、只取文本，不含工具调用参数）；
     - approval：图停在审批上，附带服务端生成的 pendingAction（预览来自数据库，不是模型输出）；
     - final：运行结束，内容与普通接口的返回一致（状态取自 agent_action）；
@@ -544,6 +549,9 @@ def stream_run(run: PreparedRun) -> Iterator[str]:
                         yield _sse("approval", {"pendingAction": _pending_action_dict(db, run.graph.get_state(run.config))})
                     else:
                         messages = update.get("messages", []) if isinstance(update, dict) else []
+                        if node == "cite":
+                            # 引用修复替换的是已经推送过的回复：这里不重复推送消息，修复后的回复和来源以 final 为准
+                            messages = []
                         yield _sse("step", {"node": node, "messages": [_message_to_dict(m) for m in messages]})
         except GraphRecursionError:
             yield _error_event(db, run, 500, "处理步数超过上限，请缩小问题范围后重试")

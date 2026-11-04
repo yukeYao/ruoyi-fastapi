@@ -11,6 +11,8 @@
   （与线上"未配置 Embedding"时的行为相同）。启动前清空 AGENT_EMBEDDING_API_KEY，不读取该 Key。
 - 索引放临时目录，结束时删除；不碰开发环境的 data/knowledge_index。
 - 知识文档 = docs/knowledge 全部文档 + evals/fixtures/knowledge 里的注入文档。
+- 清理只针对测试库和 Redis db 1：物理删除 smoke_ 用户、角色及其关联，删除本次运行产生的会话、审批记录、
+  登录日志和操作日志、知识库表数据，以及本次登录产生的 Redis 登录态和频率限制计数。
 - 判定只看接口返回的结构化字段（sources、invalidCitations、knowledgeStatus、pendingAction）、工具结果和数据库，
   不看模型回复的措辞。结果写到 evals/results/<时间>-rag-smoke/（不提交）。
 """
@@ -125,6 +127,38 @@ def check(case_id: str, trace: dict) -> list[str]:
     return failures
 
 
+def cleanup_smoke_data(env, created_users: list[int], created_roles: list[int], conversations: list[str],
+                       logins: list[dict], operator_ids: set[int], marks: dict[str, int]) -> None:
+    """
+    只在测试库和 Redis db 1 上执行（先校验环境）：物理删除 smoke_ 用户、角色及其关联，
+    删除本次产生的登录日志、操作日志、会话、审批记录、知识库表数据，以及本次的 Redis 登录态和频率限制计数。
+    ID 都来自服务端查询并经过 int() 转换，按参数绑定执行
+    """
+    from app.core.constants import AGENT_RATE_LIMIT_KEY_PREFIX, LOGIN_TOKEN_KEY_PREFIX, LOGIN_USER_KEY
+    from app.core.security import decode_jwt_token
+
+    env.ensure_test_environment()
+    for user_id in created_users:
+        for table in ("sys_user_role", "sys_user_post", "sys_user"):
+            env.sql(f"DELETE FROM {table} WHERE user_id = :i", i=int(user_id))
+    for role_id in created_roles:
+        for table in ("sys_user_role", "sys_role_menu", "sys_role_dept", "sys_role"):
+            env.sql(f"DELETE FROM {table} WHERE role_id = :i", i=int(role_id))
+    if marks:
+        env.sql("DELETE FROM sys_oper_log WHERE oper_id > :m", m=int(marks["oper"]))
+        env.sql("DELETE FROM sys_logininfor WHERE info_id > :m", m=int(marks["login"]))
+    for headers_ in logins:
+        token = headers_["Authorization"].split(" ", 1)[1]
+        env.redis_client.delete(LOGIN_TOKEN_KEY_PREFIX + decode_jwt_token(token)[LOGIN_USER_KEY])
+    for user_id in operator_ids:
+        env.redis_client.delete(AGENT_RATE_LIMIT_KEY_PREFIX + str(user_id))
+    for table in ("agent_knowledge_chunk", "agent_knowledge_doc", "agent_knowledge_index"):
+        env.sql(f"DELETE FROM {table}")
+    for conv in conversations:
+        env.sql("DELETE FROM agent_action WHERE conversation_id = :c", c=conv)
+        env.sql("DELETE FROM agent_conversation WHERE conversation_id = :c", c=conv)
+
+
 # ---------------------------------------------------------------------------
 # 运行
 # ---------------------------------------------------------------------------
@@ -158,6 +192,8 @@ def main(argv: list[str] | None = None) -> None:
     from app.agent.model import is_model_configured
     from app.agent.checkpointer import close_checkpointer
     from app.config import BACKEND_DIR, settings
+    from app.core.constants import AGENT_RATE_LIMIT_KEY_PREFIX, LOGIN_TOKEN_KEY_PREFIX, LOGIN_USER_KEY
+    from app.core.security import decode_jwt_token
     from app.core.database import SessionLocal
     from app.rag import embedding
     from app.rag.documents import load_docs
@@ -179,6 +215,15 @@ def main(argv: list[str] | None = None) -> None:
     embedding.get_embedding_model = no_embedding
 
     created_users, created_roles, conversations = [], [], []
+    logins: list[dict] = []           # 本次登录得到的请求头：结束时删除对应的 Redis 登录态
+    operator_ids: set[int] = {1}      # 发过对话请求的用户：结束时删除他们的频率限制计数
+    marks: dict[str, int] = {}        # 运行前的日志最大 ID：结束时删除本次产生的登录日志、操作日志
+
+    def login(user_name: str, password: str) -> dict:
+        headers = env.login(user_name, password)
+        logins.append(headers)
+        return headers
+
     try:
         # 1. 测试库：若依 + 智能助手 + 知识库表；关闭验证码
         create_database_if_not_exists()
@@ -187,6 +232,8 @@ def main(argv: list[str] | None = None) -> None:
         import_sql_file(KNOWLEDGE_SQL_FILE)
         env.redis_client.flushdb()
         env.sql("UPDATE sys_config SET config_value = 'false' WHERE config_key = 'sys.account.captchaEnabled'")
+        marks["oper"] = env.sql("SELECT COALESCE(MAX(oper_id), 0) FROM sys_oper_log")[0][0]
+        marks["login"] = env.sql("SELECT COALESCE(MAX(info_id), 0) FROM sys_logininfor")[0][0]
 
         # 2. 临时索引：正式文档 + 注入文档，用假 Embedding 构建（检索时不会用到向量）
         for path in [*(BACKEND_DIR.parent / "docs" / "knowledge").glob("*.md"), *FIXTURE_DOCS.glob("*.md")]:
@@ -199,7 +246,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"临时索引：{report.chunk_count} 个分块（BM25 降级模式）")
 
         # 3. smoke_ 测试数据：没有智能助手菜单的角色和 smoke_t01、只有智能助手菜单的 smoke_plain、注入目标
-        admin = env.login("admin", "admin123")
+        admin = login("admin", "admin123")
 
         def add_role(name, perms):
             body = {"roleName": name, "roleKey": name, "roleSort": 90, "status": "0", "menuIds": env._menu_ids(perms)}
@@ -217,7 +264,8 @@ def main(argv: list[str] | None = None) -> None:
         add_user(TARGET, [add_role(TARGET_ROLE, ["system:user:list"])])
         add_user(PLAIN, [add_role(PLAIN_ROLE, ["agent:chat:use"])])
         add_user(VICTIM, [])
-        headers = {"admin": admin, PLAIN: env.login(PLAIN, SMOKE_PASSWORD)}
+        headers = {"admin": admin, PLAIN: login(PLAIN, SMOKE_PASSWORD)}
+        operator_ids.add(env.sql("SELECT user_id FROM sys_user WHERE user_name = :n AND del_flag = '0'", n=PLAIN)[0][0])
 
         # 4. 逐条运行：只走普通对话接口，不批准任何审批
         cases = [c for c in CASES if not args.cases or c["id"] in args.cases]
@@ -282,18 +330,9 @@ def main(argv: list[str] | None = None) -> None:
         print(f"通过 {summary['passed']}/{summary['runs']}；模型 ID：{summary['model_ids']}；"
               f"Token 合计 {summary['input_tokens']}/{summary['output_tokens']}；轨迹：{out_dir / 'traces.json'}")
     finally:
-        # 5. 清理：smoke_ 数据、知识库表、临时索引和文档目录
+        # 5. 清理（只在测试库和 Redis db 1 上）：smoke_ 数据物理删除、日志、知识库表、Redis、临时索引和文档目录
         try:
-            admin = env.login("admin", "admin123")
-            if created_users:
-                env.client.delete("/system/user/" + ",".join(map(str, created_users)), headers=admin)
-            if created_roles:
-                env.client.delete("/system/role/" + ",".join(map(str, created_roles)), headers=admin)
-            for table in ("agent_knowledge_chunk", "agent_knowledge_doc", "agent_knowledge_index"):
-                env.sql(f"DELETE FROM {table}")
-            for conv in conversations:
-                env.sql("DELETE FROM agent_action WHERE conversation_id = :c", c=conv)
-                env.sql("DELETE FROM agent_conversation WHERE conversation_id = :c", c=conv)
+            cleanup_smoke_data(env, created_users, created_roles, conversations, logins, operator_ids, marks)
         finally:
             knowledge_service.clear_cache()
             # 会话内容已经写进 traces.json，checkpoint 文件不再保留
