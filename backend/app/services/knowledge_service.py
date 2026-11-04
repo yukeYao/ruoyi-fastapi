@@ -67,6 +67,9 @@ MSG_EMPTY_QUERY = "问题不能为空"
 NOTE_NO_RESULT = ("知识库中没有找到与问题相关的内容。这不代表系统没有相关规则：可能没有收录，也可能不在你可读的范围内。"
                   "回答时不能编造规则或引用，应如实说明没有找到依据。")
 NOTE_DEGRADED = "向量检索暂时不可用，本次只使用关键词检索，结果可能不完整。"
+NOTE_VECTOR_UNAVAILABLE = "向量检索暂时不可用，本次没有检索结果。"
+RETRIEVAL_MODES = ("hybrid", "bm25", "vector")
+MSG_BAD_MODE = "知识库检索方式配置错误"
 
 
 class KnowledgeIndexUnavailable(ServiceException):
@@ -336,7 +339,7 @@ def _chunk_tokens(build_id: str, chunk: ChunkRecord) -> list[str]:
         return _token_cache[key]
 
 
-def _bm25_search(build_id: str, allowed: list[ChunkRecord], query_tokens: list[str]) -> list[tuple[ChunkRecord, float, int]]:
+def bm25_search(build_id: str, allowed: list[ChunkRecord], query_tokens: list[str]) -> list[tuple[ChunkRecord, float, int]]:
     """只在可读集合上建 BM25；返回得分大于 0 的前 KNOWLEDGE_CANDIDATES 个 (分块, 分数, 命中词数)"""
     if not allowed or not query_tokens:
         return []
@@ -366,7 +369,7 @@ def _vector_search(active: ActiveIndex, query: str, allowed: list[ChunkRecord]) 
 
 
 def search_knowledge(db: Session, login_user: dict, query: str, top_k: int = KNOWLEDGE_TOP_K,
-                     thresholds: Thresholds | None = None) -> KnowledgeSearchResult:
+                     thresholds: Thresholds | None = None, mode: str | None = None) -> KnowledgeSearchResult:
     try:
         query = embedding.check_query(query)
     except QueryTooLongError as exc:
@@ -375,6 +378,9 @@ def search_knowledge(db: Session, login_user: dict, query: str, top_k: int = KNO
         raise ServiceException(MSG_EMPTY_QUERY)
     top_k = max(1, min(int(top_k), KNOWLEDGE_MAX_TOP_K))
     thresholds = thresholds or current_thresholds()
+    mode = mode or settings.knowledge_retrieval_mode
+    if mode not in RETRIEVAL_MODES:
+        raise ServiceException(MSG_BAD_MODE)
 
     try:
         active = load_active_index(db)
@@ -387,8 +393,9 @@ def search_knowledge(db: Session, login_user: dict, query: str, top_k: int = KNO
     by_id = {c.chunk_id: c for c in allowed}
     by_vector = {c.vector_id: c for c in allowed}
 
-    bm25_hits = _bm25_search(active.build_id, allowed, tokenize(query))
-    vector_hits, degraded = _vector_search(active, query, allowed)
+    # 单一检索方式（评估对照）只跑对应的一路；hybrid 两路都跑
+    bm25_hits = bm25_search(active.build_id, allowed, tokenize(query)) if mode != "vector" else []
+    vector_hits, degraded = _vector_search(active, query, allowed) if mode != "bm25" else ([], False)
     # 防御：向量检索返回了可读集合以外的 ID（不应发生）就丢弃，而不是去分块表里查
     vector_hits = [(v, s) for v, s in vector_hits if v in by_vector]
 
@@ -410,5 +417,6 @@ def search_knowledge(db: Session, login_user: dict, query: str, top_k: int = KNO
                      round(r.bm25_score, 4))
         for r, text in zip(ranked, snippets)
     )
-    notes = ([NOTE_DEGRADED] if degraded else []) + ([] if hits else [NOTE_NO_RESULT])
+    degraded_note = NOTE_VECTOR_UNAVAILABLE if mode == "vector" else NOTE_DEGRADED
+    notes = ([degraded_note] if degraded else []) + ([] if hits else [NOTE_NO_RESULT])
     return KnowledgeSearchResult(hits, "".join(notes), degraded)

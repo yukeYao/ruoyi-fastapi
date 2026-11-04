@@ -1,0 +1,168 @@
+"""
+评估流程（由 run.py 在设置好测试库环境变量之后导入）：
+
+1. 重建测试库（若依 + 智能助手 + 知识库表），关闭验证码；
+2. 检索评估：用配置的 Embedding 建索引（只含正式文档），每个问题算一次向量并缓存，
+   收集可读集合内的两路候选，在 dev 上按方式分别校准门槛，在 test 上报告（同时给出当前默认门槛在 test 上的结果作对照）；
+3. 端到端评估：索引加入评估专用的注入文档，门槛使用第 2 步在 dev 上校准的值（没有就用当前配置，并在报告里写明），
+   按方案逐条运行、评分、汇总，导出人工核对清单；
+4. 无论成功失败，按记录物理删除 smoke_ev_ 数据、会话、审批记录、知识库行、登录态和频率限制计数。
+"""
+import json
+import shutil
+from dataclasses import asdict
+from pathlib import Path
+
+from app.agent.model import is_model_configured
+from app.config import BACKEND_DIR, settings
+from app.core.constants import KNOWLEDGE_RRF_K, KNOWLEDGE_TOP_K
+from app.core.database import SessionLocal
+from app.rag import embedding
+from app.rag.documents import load_docs
+from app.rag.retriever import Thresholds
+from app.services import knowledge_service
+from evals import environment as env
+from evals.rag import metrics, report, retrieval, runner
+from evals.rag.run import E2E_DATASET, FIXTURE_DOCS, PRICES, RETRIEVAL_DATASET, load_e2e_cases
+from evals.rag_smoke import SmokeRecords, cleanup_smoke_data
+from evals.run_eval import _git_commit
+from scripts.init_db import AGENT_SQL_FILE, KNOWLEDGE_SQL_FILE, create_database_if_not_exists, import_sql_file
+
+DOCS_DIR = BACKEND_DIR.parent / "docs" / "knowledge"
+
+
+def _check_environment(out_dir: Path, stage: str) -> None:
+    env.ensure_test_environment()
+    if not settings.knowledge_index_dir.resolve().is_relative_to(out_dir.resolve()):
+        raise SystemExit("索引目录不在本次运行目录里，停止运行")
+    if not embedding.is_embedding_configured():
+        raise SystemExit("未配置 Embedding（AGENT_EMBEDDING_MODEL、AGENT_EMBEDDING_API_KEY）")
+    if stage in ("e2e", "all") and not is_model_configured():
+        raise SystemExit("未配置对话模型（AGENT_MODEL、AGENT_API_KEY）")
+
+
+def _rebuild_test_db() -> None:
+    create_database_if_not_exists()
+    import_sql_file()
+    import_sql_file(AGENT_SQL_FILE)
+    import_sql_file(KNOWLEDGE_SQL_FILE)
+    env.redis_client.flushdb()
+    env.sql("UPDATE sys_config SET config_value = 'false' WHERE config_key = 'sys.account.captchaEnabled'")
+
+
+def _build(docs_dir: Path, model, records: SmokeRecords) -> dict:
+    db = SessionLocal()
+    try:
+        docs = load_docs(docs_dir)
+        built = knowledge_service.build_index(db, docs, model, settings.knowledge_index_dir)
+    finally:
+        db.close()
+    records.knowledge_doc_ids = sorted(set(records.knowledge_doc_ids) | {d.doc_id for d in docs})
+    records.build_id = built.build_id
+    knowledge_service.clear_cache()
+    return {"build_id": built.build_id, "chunks": built.chunk_count, "embedded": built.embedded}
+
+
+def _thresholds_dict(t: Thresholds) -> dict:
+    return asdict(t)
+
+
+def run_retrieval(out_dir: Path, model, records: SmokeRecords) -> dict:
+    index = _build(DOCS_DIR, model, records)
+    cases = retrieval.load_cases(RETRIEVAL_DATASET)
+    vectors = retrieval.embed_queries(cases, model, out_dir / "query_vectors.json")
+    db = SessionLocal()
+    try:
+        candidates = retrieval.collect_candidates(db, cases, vectors)
+    finally:
+        db.close()
+    dev = [c for c in cases if c["split"] == "dev"]
+    test = [c for c in cases if c["split"] == "test"]
+    defaults = knowledge_service.current_thresholds()
+    result = {"index": index, "dataset_version": json.loads(RETRIEVAL_DATASET.read_text(encoding="utf-8"))["version"],
+              "n_dev": len(dev), "n_test": len(test), "top_k": KNOWLEDGE_TOP_K, "defaults": _thresholds_dict(defaults),
+              "modes": {}}
+    for mode in metrics.MODES:
+        # 校准只看 dev；test 只用来报告校准后的门槛和默认门槛的效果
+        tuned, dev_m = metrics.calibrate(dev, candidates, mode, KNOWLEDGE_TOP_K, KNOWLEDGE_RRF_K)
+        test_m = metrics.retrieval_metrics(test, candidates, mode, tuned, KNOWLEDGE_TOP_K, KNOWLEDGE_RRF_K)
+        default_m = metrics.retrieval_metrics(test, candidates, mode, defaults, KNOWLEDGE_TOP_K, KNOWLEDGE_RRF_K)
+        result["modes"][mode] = {"thresholds": _thresholds_dict(tuned), "dev": dev_m, "test": test_m,
+                                 "test_with_defaults": default_m}
+    (out_dir / "candidates.json").write_text(json.dumps(candidates, ensure_ascii=False), encoding="utf-8")
+    (out_dir / "retrieval.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
+    return result
+
+
+def run_e2e(out_dir: Path, model, records: SmokeRecords, runs: int, variant_names: list[str],
+            case_ids: list[str] | None) -> dict:
+    docs_dir = out_dir / "docs"
+    docs_dir.mkdir(exist_ok=True)
+    for path in [*DOCS_DIR.glob("*.md"), *FIXTURE_DOCS.glob("*.md")]:
+        shutil.copy(path, docs_dir / path.name)
+    index = _build(docs_dir, model, records)
+
+    retrieval_file = out_dir / "retrieval.json"
+    tuned = json.loads(retrieval_file.read_text(encoding="utf-8"))["modes"] if retrieval_file.exists() else {}
+    thresholds_source = "dev 校准" if tuned else "当前配置（本目录没有检索评估结果）"
+    defaults = knowledge_service.current_thresholds()
+
+    headers = runner.prepare_data(records)
+    cases = [c for c in load_e2e_cases() if not case_ids or c["id"] in case_ids]
+    traces, scored = [], []
+    for name in variant_names:
+        variant = runner.VARIANTS[name]
+        t = Thresholds(**tuned[variant.mode]["thresholds"]) if variant.mode in tuned else defaults
+        for case in [c for c in cases if c["category"] in variant.categories]:
+            for run in range(1, runs + 1):
+                trace = runner.run_case(case, variant, run, headers, t, model, records)
+                result = metrics.score_e2e(case, trace)
+                traces.append(trace)
+                scored.append({**result, "variant": name, "run": run})
+                verdict = "通过" if result["passed"] else "未通过：" + ",".join(k for k, v in result["checks"].items() if v is False)
+                print(f"[{name}] {case['id']} 第{run}次 {verdict}  {trace['latency']}s  "
+                      f"Token={trace['input_tokens']}/{trace['output_tokens']}" + (f"  错误：{trace['error']}" if trace["error"] else ""),
+                      flush=True)
+    summary = {name: metrics.aggregate_e2e([s for s in scored if s["variant"] == name],
+                                           [t for t in traces if t["variant"] == name], PRICES)
+               for name in variant_names}
+    result = {"index": index, "thresholds_source": thresholds_source, "runs": runs,
+              "dataset_version": json.loads(E2E_DATASET.read_text(encoding="utf-8"))["version"],
+              "model_ids": sorted({n for t in traces for n in t["model_names"]}), "summary": summary}
+    (out_dir / "traces.json").write_text(json.dumps(traces, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    (out_dir / "scored.json").write_text(json.dumps(scored, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    (out_dir / "e2e.json").write_text(json.dumps(result, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    (out_dir / "manual_review.md").write_text(report.manual_review(cases, traces, scored), encoding="utf-8")
+    return result
+
+
+def run(out_dir: Path, stage: str, runs: int, variant_names: list[str], case_ids: list[str] | None) -> None:
+    _check_environment(out_dir, stage)
+    model = embedding.get_embedding_model()
+    # 整次评估共用一个 Embedding 客户端：它累计接口返回的 Token，用于统计成本
+    embedding.get_embedding_model = lambda: model
+    records = SmokeRecords()
+    meta = {"commit": _git_commit(), "chat_model": settings.agent_model, "embedding_model": model.name,
+            "prices": PRICES}
+    try:
+        _rebuild_test_db()
+        if stage in ("retrieval", "all"):
+            r = run_retrieval(out_dir, model, records)
+            print(f"检索评估完成：dev {r['n_dev']} 条、test {r['n_test']} 条")
+        if stage in ("e2e", "all"):
+            e = run_e2e(out_dir, model, records, runs, variant_names, case_ids)
+            print(f"端到端评估完成：模型 ID {e['model_ids']}")
+        meta["embedding_tokens_total"] = getattr(model, "total_tokens", 0)
+        (out_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+        (out_dir / "report.md").write_text(report.render(out_dir), encoding="utf-8")
+        print(f"报告：{out_dir / 'report.md'}")
+    finally:
+        try:
+            cleanup_smoke_data(env, records)
+        finally:
+            from app.agent.checkpointer import close_checkpointer
+
+            knowledge_service.clear_cache()
+            close_checkpointer()
+            for path in out_dir.glob("checkpoints.sqlite*"):
+                path.unlink(missing_ok=True)

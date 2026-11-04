@@ -116,13 +116,18 @@ def stop_message(login_user: dict) -> str:
     return MSG_LOOP_STOPPED + "请换一种问法，或提供更具体的条件（例如准确的登录账号）后重试。"
 
 
-def bindable_tools(login_user: dict) -> list[ToolSpec]:
-    """当前用户有权限的工具（只读和写工具）。绑定只决定"模型看得到什么"，执行前还会再校验"""
-    return [spec for spec in TOOLS.values() if _has_all(login_user, spec)]
+def allowed_by_run(name: str, allowed: frozenset[str] | None) -> bool:
+    """运行时工具白名单（AgentContext.tool_names）：None 表示不额外限制"""
+    return allowed is None or name in allowed
 
 
-def bindable_tool_schemas(login_user: dict) -> list[dict]:
-    return [tool_schema(spec) for spec in bindable_tools(login_user)]
+def bindable_tools(login_user: dict, allowed: frozenset[str] | None = None) -> list[ToolSpec]:
+    """当前用户有权限、且在本次运行白名单里的工具。绑定只决定"模型看得到什么"，执行前还会再校验"""
+    return [spec for spec in TOOLS.values() if _has_all(login_user, spec) and allowed_by_run(spec.name, allowed)]
+
+
+def bindable_tool_schemas(login_user: dict, allowed: frozenset[str] | None = None) -> list[dict]:
+    return [tool_schema(spec) for spec in bindable_tools(login_user, allowed)]
 
 
 def has_tool_calls(message: BaseMessage) -> bool:
@@ -176,11 +181,11 @@ def parse_args(spec: ToolSpec, call: dict):
         return None, f"{MSG_INVALID_ARGS}：{fields}"
 
 
-def run_read_tool(login_user: dict, call: dict) -> ToolMessage:
+def run_read_tool(login_user: dict, call: dict, allowed: frozenset[str] | None = None) -> ToolMessage:
     """执行一个只读工具调用；任何失败都转成错误 ToolMessage，不向外抛异常"""
     name, call_id = call.get("name") or "", call.get("id") or ""
     spec = TOOLS.get(name)
-    if spec is None:
+    if spec is None or not allowed_by_run(name, allowed):
         return error_message(call_id, name, MSG_UNKNOWN_TOOL)
     if spec.risk != RISK_READ or spec.run is None:
         # 写工具绝不在这里执行：只能经 propose -> 审批 -> execute
@@ -222,7 +227,8 @@ def run_read_tool(login_user: dict, call: dict) -> ToolMessage:
         db.close()
 
 
-def handle_tool_calls(login_user: dict, message: AIMessage, skip_ids: frozenset[str] = frozenset()) -> list[ToolMessage]:
+def handle_tool_calls(login_user: dict, message: AIMessage, skip_ids: frozenset[str] = frozenset(),
+                      allowed: frozenset[str] | None = None) -> list[ToolMessage]:
     """
     处理一条 AIMessage 里的全部工具调用，保证每个 tool_call_id 都有且只有一条 ToolMessage：
     - 超过单步上限的调用不执行；
@@ -241,10 +247,10 @@ def handle_tool_calls(login_user: dict, message: AIMessage, skip_ids: frozenset[
             results.append(error_message(call["id"], call.get("name") or "", MSG_REPEATED_CALL))
         elif index >= AGENT_MAX_TOOL_CALLS_PER_STEP:
             results.append(error_message(call.get("id") or "", call.get("name") or "", MSG_TOO_MANY_CALLS))
-        elif spec is not None and spec.risk == RISK_WRITE:
+        elif spec is not None and spec.risk == RISK_WRITE and allowed_by_run(spec.name, allowed):
             results.append(error_message(call["id"], spec.name, MSG_WRITE_WITH_READ))
         else:
-            results.append(run_read_tool(login_user, call))
+            results.append(run_read_tool(login_user, call, allowed))
 
     for bad in message.invalid_tool_calls:
         results.append(error_message(bad.get("id") or "", bad.get("name") or "", MSG_INVALID_JSON))

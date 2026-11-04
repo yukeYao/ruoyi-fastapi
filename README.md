@@ -177,6 +177,14 @@ pytest 只用假 Embedding 和临时索引目录，不需要 Key，也不会动�
 模型没写引用时，纯知识问答（本轮只调用过知识库）会由服务端做一次引用修复，结果标为"自动关联，未核验"；
 本轮调用过任何业务工具时不做修复，检索到的片段只作为"未被引用的参考资料"显示。
 
+知识库评估（会调用真实模型和 Embedding，手动运行；方法见 [docs/rag-eval-report.md](docs/rag-eval-report.md)）：
+
+```powershell
+cd backend
+.venv\Scripts\python.exe -m evals.rag.run --plan                # 只打印规模和费用估算，不调用 API
+.venv\Scripts\python.exe -m evals.rag.run --stage all --runs 2   # 检索评估（dev 校准、test 报告）+ 端到端评估
+```
+
 评估（会调用真实模型，手动运行）：
 
 ```powershell

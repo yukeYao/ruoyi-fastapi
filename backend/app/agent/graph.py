@@ -64,7 +64,7 @@ def agent_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
         # 剩余时间不够一个模型超时：不再调用模型，尽量让运行在运行锁过期前结束（软时限，见 constants）
         return {"messages": [AIMessage(content=MSG_TIME_LIMIT)]}
 
-    schemas = policy.bindable_tool_schemas(ctx.login_user)
+    schemas = policy.bindable_tool_schemas(ctx.login_user, ctx.tool_names)
     model = ctx.model.bind_tools(schemas) if schemas else ctx.model
     # 系统提示词每次拼在最前面，不写进 state：避免 checkpoint 里存多份，也方便以后修改提示词。
     # 能力边界按本次运行的登录态生成（可信的服务端上下文），权限变化后下一次运行立即生效
@@ -113,7 +113,8 @@ def _stop(ctx: AgentContext) -> AIMessage:
 def tools_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
     last = state["messages"][-1]
     repeated, keys = _repeated_ids(last.tool_calls, set(state.get("call_keys") or []))
-    results = policy.handle_tool_calls(runtime.context.login_user, last, skip_ids=repeated)
+    results = policy.handle_tool_calls(runtime.context.login_user, last, skip_ids=repeated,
+                                       allowed=runtime.context.tool_names)
 
     # 有进展 = 拿到了本轮之前没见过的结果（参数不同但结果相同，例如连续空结果，也算没有进展）
     seen_hashes = set(state.get("result_hashes") or [])

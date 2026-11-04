@@ -105,6 +105,8 @@ class OpenAICompatibleEmbedding:
         from openai import OpenAI
 
         self.name = model
+        # 累计的 Embedding 输入 Token（取自接口返回的 usage），评估据此统计成本
+        self.total_tokens = 0
         # max_retries=0：失败直接返回，由调用方安全降级；不要让一次检索叠加多个超时
         self._client = OpenAI(api_key=api_key, base_url=base_url or None,
                               timeout=KNOWLEDGE_EMBED_TIMEOUT_SECONDS, max_retries=0)
@@ -122,6 +124,8 @@ class OpenAICompatibleEmbedding:
             if error:
                 raise EmbeddingError(error)
             rows += [item.embedding for item in sorted(response.data, key=lambda d: d.index)]
+            usage = getattr(response, "usage", None)
+            self.total_tokens += int(getattr(usage, "total_tokens", 0) or 0)
         if len(rows) != len(texts):
             raise EmbeddingError("Embedding 调用失败：返回的向量数量与输入不一致")
         return l2_normalize(np.array(rows, dtype="float32"))

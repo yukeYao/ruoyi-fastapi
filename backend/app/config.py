@@ -56,6 +56,8 @@ class Settings(BaseSettings):
     knowledge_min_vector_score: float = 0.45
     knowledge_min_bm25_score: float = 1.5
     knowledge_min_bm25_terms: int = 2
+    # 检索方式：hybrid（BM25 + 向量，RRF 合并）、bm25、vector。默认 hybrid；另外两种用于评估对照
+    knowledge_retrieval_mode: str = "hybrid"
 
     @property
     def sqlalchemy_database_uri(self) -> str:
