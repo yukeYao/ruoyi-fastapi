@@ -318,3 +318,40 @@ def test_e2e_case_dry_run_with_scripted_model(eval_dirs, scripted_model, monkeyp
     finally:
         cleanup_smoke_data(env, records)
     assert env.sql("SELECT COUNT(*) FROM sys_user WHERE user_name LIKE 'smoke\\\\_ev\\\\_%'")[0][0] == 0
+
+
+def test_budget_guard_thresholds(monkeypatch):
+    from evals.rag import pipeline
+    from evals.rag import run as run_config
+
+    assert pipeline.over_budget(4_999_999, 0, 0) == ""
+    assert "输入 Token" in pipeline.over_budget(5_000_001, 0, 0)
+    # 费用：输入 0.15、输出 0.60 美元 / 百万 Token
+    assert "费用" in pipeline.over_budget(0, 1_700_000, 0)
+    monkeypatch.setattr(run_config, "BUDGET_USD", 0.0)
+    assert "费用" in pipeline.over_budget(1, 0, 0)
+
+
+def test_e2e_stops_when_over_budget_and_keeps_results(eval_dirs, scripted_model, monkeypatch):
+    """预算用尽时立即停止：只跑了第一条，已有结果落盘，e2e.json 写明停止原因"""
+    from langchain_core.messages import AIMessage
+
+    from app.rag import embedding
+    from app.rag.embedding import FakeEmbeddingModel
+    from evals import environment as env
+    from evals.rag import pipeline
+    from evals.rag import run as run_config
+    from evals.rag_smoke import SmokeRecords, cleanup_smoke_data
+
+    model = FakeEmbeddingModel()
+    monkeypatch.setattr(embedding, "get_embedding_model", lambda: model)
+    monkeypatch.setattr(run_config, "BUDGET_USD", -1.0)
+    scripted_model(AIMessage(content="知识库中没有找到相关说明"), AIMessage(content="不应该被调用"))
+    records = SmokeRecords()
+    try:
+        result = pipeline.run_e2e(eval_dirs, model, records, 3, ["hybrid"], ["N01"])
+    finally:
+        cleanup_smoke_data(env, records)
+    traces = json.loads((eval_dirs / "traces.json").read_text(encoding="utf-8"))
+    assert len(traces) == 1 and "费用" in result["stopped"]
+    assert json.loads((eval_dirs / "e2e.json").read_text(encoding="utf-8"))["stopped"] == result["stopped"]

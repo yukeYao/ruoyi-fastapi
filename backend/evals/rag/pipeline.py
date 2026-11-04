@@ -11,6 +11,7 @@
 import json
 import shutil
 from dataclasses import asdict
+from datetime import datetime
 from pathlib import Path
 
 from app.agent.model import is_model_configured
@@ -23,6 +24,7 @@ from app.rag.retriever import Thresholds
 from app.services import knowledge_service
 from evals import environment as env
 from evals.rag import metrics, report, retrieval, runner
+from evals.rag import run as run_config
 from evals.rag.run import E2E_DATASET, FIXTURE_DOCS, PRICES, RETRIEVAL_DATASET, load_e2e_cases
 from evals.rag_smoke import SmokeRecords, cleanup_smoke_data
 from evals.run_eval import _git_commit
@@ -63,6 +65,21 @@ def _build(docs_dir: Path, model, records: SmokeRecords) -> dict:
     return {"build_id": built.build_id, "chunks": built.chunk_count, "embedded": built.embedded}
 
 
+def spent(input_tokens: int, output_tokens: int, embedding_tokens: int) -> float:
+    return (input_tokens / 1e6 * PRICES["input"] + output_tokens / 1e6 * PRICES["output"]
+            + embedding_tokens / 1e6 * PRICES["embedding"])
+
+
+def over_budget(input_tokens: int, output_tokens: int, embedding_tokens: int) -> str:
+    """超出预算时返回原因，否则返回空字符串"""
+    cost = spent(input_tokens, output_tokens, embedding_tokens)
+    if cost > run_config.BUDGET_USD:
+        return f"累计估算费用 {cost:.4f} 美元超过上限 {run_config.BUDGET_USD} 美元"
+    if input_tokens > run_config.BUDGET_INPUT_TOKENS:
+        return f"累计输入 Token {input_tokens} 超过上限 {run_config.BUDGET_INPUT_TOKENS}"
+    return ""
+
+
 def _thresholds_dict(t: Thresholds) -> dict:
     return asdict(t)
 
@@ -94,8 +111,13 @@ def run_retrieval(out_dir: Path, model, records: SmokeRecords) -> dict:
     return result
 
 
+def _save_traces(out_dir: Path, traces: list[dict], scored: list[dict]) -> None:
+    (out_dir / "traces.json").write_text(json.dumps(traces, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    (out_dir / "scored.json").write_text(json.dumps(scored, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+
+
 def run_e2e(out_dir: Path, model, records: SmokeRecords, runs: int, variant_names: list[str],
-            case_ids: list[str] | None) -> dict:
+            case_ids: list[str] | None, prior_embedding_tokens: int = 0) -> dict:
     docs_dir = out_dir / "docs"
     docs_dir.mkdir(exist_ok=True)
     for path in [*DOCS_DIR.glob("*.md"), *FIXTURE_DOCS.glob("*.md")]:
@@ -110,11 +132,14 @@ def run_e2e(out_dir: Path, model, records: SmokeRecords, runs: int, variant_name
     headers = runner.prepare_data(records)
     cases = [c for c in load_e2e_cases() if not case_ids or c["id"] in case_ids]
     traces, scored = [], []
+    stopped = ""
     for name in variant_names:
         variant = runner.VARIANTS[name]
         t = Thresholds(**tuned[variant.mode]["thresholds"]) if variant.mode in tuned else defaults
         for case in [c for c in cases if c["category"] in variant.categories]:
             for run in range(1, runs + 1):
+                if stopped:
+                    break
                 trace = runner.run_case(case, variant, run, headers, t, model, records)
                 result = metrics.score_e2e(case, trace)
                 traces.append(trace)
@@ -123,14 +148,21 @@ def run_e2e(out_dir: Path, model, records: SmokeRecords, runs: int, variant_name
                 print(f"[{name}] {case['id']} 第{run}次 {verdict}  {trace['latency']}s  "
                       f"Token={trace['input_tokens']}/{trace['output_tokens']}" + (f"  错误：{trace['error']}" if trace["error"] else ""),
                       flush=True)
+                # 每条用例后落盘：中途停止或出错时已有结果不丢
+                _save_traces(out_dir, traces, scored)
+                # 预算按实际 usage 累计（含检索评估和索引构建用掉的 Embedding Token）
+                stopped = over_budget(sum(x["input_tokens"] for x in traces), sum(x["output_tokens"] for x in traces),
+                                      getattr(model, "total_tokens", 0) + prior_embedding_tokens)
+                if stopped:
+                    print(f"预算保护：{stopped}，停止运行并保存已有结果", flush=True)
+    ran = [name for name in variant_names if any(t["variant"] == name for t in traces)]
     summary = {name: metrics.aggregate_e2e([s for s in scored if s["variant"] == name],
                                            [t for t in traces if t["variant"] == name], PRICES)
-               for name in variant_names}
-    result = {"index": index, "thresholds_source": thresholds_source, "runs": runs,
+               for name in ran}
+    result = {"index": index, "thresholds_source": thresholds_source, "runs": runs, "stopped": stopped,
               "dataset_version": json.loads(E2E_DATASET.read_text(encoding="utf-8"))["version"],
               "model_ids": sorted({n for t in traces for n in t["model_names"]}), "summary": summary}
-    (out_dir / "traces.json").write_text(json.dumps(traces, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
-    (out_dir / "scored.json").write_text(json.dumps(scored, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+    _save_traces(out_dir, traces, scored)
     (out_dir / "e2e.json").write_text(json.dumps(result, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
     (out_dir / "manual_review.md").write_text(report.manual_review(cases, traces, scored), encoding="utf-8")
     return result
@@ -142,18 +174,27 @@ def run(out_dir: Path, stage: str, runs: int, variant_names: list[str], case_ids
     # 整次评估共用一个 Embedding 客户端：它累计接口返回的 Token，用于统计成本
     embedding.get_embedding_model = lambda: model
     records = SmokeRecords()
+    # 两步运行（先 retrieval、后 e2e，同一目录）时 meta 累计，不互相覆盖
+    meta_file = out_dir / "meta.json"
+    previous = json.loads(meta_file.read_text(encoding="utf-8")) if meta_file.exists() else {}
+    prior_embedding = int(previous.get("embedding_tokens_total", 0))
     meta = {"commit": _git_commit(), "chat_model": settings.agent_model, "embedding_model": model.name,
-            "prices": PRICES}
+            "prices": PRICES, "budget": {"usd": run_config.BUDGET_USD, "input_tokens": run_config.BUDGET_INPUT_TOKENS},
+            "stages": previous.get("stages", [])}
+    started = datetime.now()
     try:
         _rebuild_test_db()
         if stage in ("retrieval", "all"):
             r = run_retrieval(out_dir, model, records)
             print(f"检索评估完成：dev {r['n_dev']} 条、test {r['n_test']} 条")
         if stage in ("e2e", "all"):
-            e = run_e2e(out_dir, model, records, runs, variant_names, case_ids)
-            print(f"端到端评估完成：模型 ID {e['model_ids']}")
-        meta["embedding_tokens_total"] = getattr(model, "total_tokens", 0)
-        (out_dir / "meta.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+            e = run_e2e(out_dir, model, records, runs, variant_names, case_ids, prior_embedding)
+            print(f"端到端评估完成：模型 ID {e['model_ids']}" + (f"；提前停止：{e['stopped']}" if e["stopped"] else ""))
+        meta["embedding_tokens_total"] = prior_embedding + getattr(model, "total_tokens", 0)
+        meta["stages"].append({"stage": stage, "commit": meta["commit"], "started": started.strftime("%Y-%m-%d %H:%M:%S"),
+                               "finished": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                               "embedding_tokens": getattr(model, "total_tokens", 0)})
+        meta_file.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
         (out_dir / "report.md").write_text(report.render(out_dir), encoding="utf-8")
         print(f"报告：{out_dir / 'report.md'}")
     finally:

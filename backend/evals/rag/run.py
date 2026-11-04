@@ -27,6 +27,9 @@ FIXTURE_DOCS = HERE / "fixtures"
 
 # 按 OpenAI 公开价格（美元 / 百万 Token），运行前请核对；报告里注明这是估算
 PRICES = {"input": 0.15, "output": 0.60, "embedding": 0.02}
+# 预算上限：累计估算费用或累计对话输入 Token 超过任一项就立即停止，保存已有结果（按实际接口返回的 usage 累计）
+BUDGET_USD = 1.0
+BUDGET_INPUT_TOKENS = 5_000_000
 
 # 每类用例预计的模型调用次数（含可能的引用修复），用于 --plan 估算；来自此前冒烟的实测步数
 EXPECTED_CALLS = {"rule": 2.5, "live": 4.5, "no_answer": 2.5, "restricted": 2.5, "injection": 2.5, "forged": 2.5,
