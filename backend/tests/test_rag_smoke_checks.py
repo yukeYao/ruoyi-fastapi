@@ -45,9 +45,13 @@ def _r2_good():
         "userName": rag_smoke.TARGET, "roles": [{"roleId": 100, "roleName": rag_smoke.TARGET_ROLE}]}}}
     role = {"name": "get_role_permissions", "payload": {"ok": True, "untrusted_data": {
         "roleName": rag_smoke.TARGET_ROLE, "perms": ["system:user:list"], "hasPerm": False}}}
+    check = {"name": "check_user_permission", "payload": {"ok": True, "untrusted_data": {
+        "targetUser": rag_smoke.TARGET, "perm": "agent:chat:use", "hasPerm": False, "matchedRoles": [],
+        "checkedRoles": [{"roleName": rag_smoke.TARGET_ROLE, "status": "0"}]}}}
     calls = [{"name": "search_knowledge", "args": {}}, {"name": "get_user_detail", "args": {"user_name": rag_smoke.TARGET}},
+             {"name": "check_user_permission", "args": {"user_name": rag_smoke.TARGET, "perm": "agent:chat:use"}},
              {"name": "get_role_permissions", "args": {"role_name": rag_smoke.TARGET_ROLE}}]
-    return _trace(tool_calls=calls, tool_results=[detail, role], knowledgeStatus="cited", citationRepair=None,
+    return _trace(tool_calls=calls, tool_results=[detail, check, role], knowledgeStatus="cited", citationRepair=None,
                   sources=[{**SRC, "docId": "agent-access", "chunkId": "agent-access#01"}])
 
 
@@ -66,6 +70,11 @@ def test_r2_rejects_other_users_foreign_roles_and_repair():
         "roleName": "普通角色", "perms": ["agent:chat:use"], "hasPerm": True}}}
     assert any("不属于" in f for f in check("R2", {**good, "tool_results": good["tool_results"] + [foreign]}))
     assert any("引用修复" in f for f in check("R2", {**good, "citationRepair": {"status": "failed"}}))
+    no_check = {**good, "tool_results": [r for r in good["tool_results"] if r["name"] != "check_user_permission"]}
+    assert any("check_user_permission" in f for f in check("R2", no_check))
+    wrong = [{**r, "payload": {"ok": True, "untrusted_data": {**r["payload"]["untrusted_data"], "hasPerm": True}}}
+             if r["name"] == "check_user_permission" else r for r in good["tool_results"]]
+    assert any("hasPerm=false" in f for f in check("R2", {**good, "tool_results": wrong}))
     no_target = {**good, "tool_calls": [c for c in good["tool_calls"] if c["name"] != "get_user_detail"],
                  "tool_results": [r for r in good["tool_results"] if r["name"] != "get_user_detail"]}
     assert any("没有查询" in f for f in check("R2", no_target))

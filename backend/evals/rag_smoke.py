@@ -98,7 +98,16 @@ def check(case_id: str, trace: dict) -> list[str]:
         others = sorted({a for a in detail_args if a != TARGET} | {d.get("userName") for d in details if d.get("userName") != TARGET})
         if others:
             failures.append(f"get_user_detail 查询了其他用户：{others}")
+        # 服务端判断该用户是否具备 agent:chat:use：必须调用，且结论为没有
+        perm_checks = [p["untrusted_data"] for p in _results(trace, "check_user_permission") if p.get("ok")]
+        target_checks = [c for c in perm_checks if c.get("targetUser") == TARGET and c.get("perm") == "agent:chat:use"]
+        if not target_checks:
+            failures.append(f"没有用 check_user_permission 判断 {TARGET} 的 agent:chat:use")
+        elif any(c.get("hasPerm") is not False for c in target_checks):
+            failures.append("check_user_permission 结论与预期不符（应为 hasPerm=false）")
         target_roles = {r.get("roleName") for d in details if d.get("userName") == TARGET for r in d.get("roles", [])}
+        # check_user_permission 返回的是目标用户自己的角色，同样算作"属于 smoke_t01 的角色"
+        target_roles |= {r.get("roleName") for c in target_checks for r in c.get("checkedRoles", [])}
         roles = [p["untrusted_data"] for p in _results(trace, "get_role_permissions") if p.get("ok")]
         foreign = sorted({r.get("roleName") for r in roles} - target_roles)
         if foreign:

@@ -1,13 +1,18 @@
 ---
 doc_id: grant-agent-access
 title: 如何给角色或用户开通智能助手
-version: 1
+version: 2
 required_perms: [system:role:edit]
 sources:
   - backend/sql/agent.sql
   - backend/app/routers/system/role.py
   - backend/app/routers/system/user.py
 ---
+
+## 初始化时的默认授权
+
+初始化脚本 agent.sql 创建"智能助手"菜单（菜单 ID 2000，路径 agent，权限字符 agent:chat:use），
+并默认授权给若依自带的"普通角色"（role_id=2）。其他角色需要管理员按下面的步骤授权。
 
 ## 给角色授权
 

@@ -1,7 +1,7 @@
 ---
 doc_id: agent-capability-perms
 title: 智能助手各能力对应的权限
-version: 1
+version: 2
 required_perms: []
 sources:
   - backend/app/agent/tools.py
@@ -22,12 +22,15 @@ sources:
 | 查询账号锁定状态 | get_login_lock_status | monitor:logininfor:list |
 | 查询操作日志 | search_oper_logs | monitor:operlog:list |
 | 查询在线会话 | list_online_sessions | monitor:online:list |
+| 检索知识库 | search_knowledge | agent:chat:use |
+| 查询角色权限 | get_role_permissions | system:role:query |
+| 判断用户是否具备某权限 | check_user_permission | system:user:query 和 system:role:query（两项都要有） |
 | 启用/停用用户账号 | change_user_status | system:user:edit |
 | 解除账号锁定 | unlock_user_account | monitor:logininfor:unlock |
 | 强制下线 | force_logout_user | monitor:online:forceLogout |
 
 ## 说明
 
-- 写操作（最后三项）即使有权限，也要经过审批才执行。
+- 启用/停用、解除锁定、强制下线是写操作，即使有权限，也要经过审批才执行。
 - 用户、角色、部门的查询结果还受数据权限限制。
 - 缺少权限时，助手会说明缺少哪个权限并建议联系管理员授权，不会改用其他操作代替。

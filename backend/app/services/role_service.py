@@ -107,6 +107,17 @@ def get_role_detail(db: Session, role_id: int) -> dict:
     return model_to_camel_dict(role)
 
 
+def list_user_roles(db: Session, user_id: int) -> list[SysRole]:
+    """用户关联的未删除角色（与登录时加载权限的查询一致，不过滤状态，由调用方判断）。调用方负责数据范围校验"""
+    return (
+        db.query(SysRole)
+        .join(SysUserRole, SysUserRole.role_id == SysRole.role_id)
+        .filter(SysUserRole.user_id == user_id, SysRole.del_flag == DEL_FLAG_NORMAL)
+        .order_by(SysRole.role_sort, SysRole.role_id)
+        .all()
+    )
+
+
 def get_role_by_name(db: Session, role_name: str) -> SysRole | None:
     """按角色名称精确查找未删除的角色（角色名称唯一，见 check_role_name_unique）。调用方负责数据范围校验"""
     return db.query(SysRole).filter(SysRole.role_name == role_name, SysRole.del_flag == DEL_FLAG_NORMAL).first()

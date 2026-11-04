@@ -29,8 +29,11 @@ from app.core.constants import (
     KNOWLEDGE_MAX_TOP_K,
     KNOWLEDGE_TOP_K,
     STATUS_DISABLE,
+    STATUS_NORMAL,
+    SUPER_ADMIN_ID,
     SUPER_ADMIN_ROLE_ID,
 )
+from app.core.deps import check_perm
 from app.core.exceptions import ServiceException
 from app.rag.documents import PERM_PATTERN
 from app.services import (
@@ -96,6 +99,13 @@ class ToolSpec:
     # 写入 sys_oper_log 的模块标题和业务类型，与对应的现有路由 @log 保持一致
     oper_title: str = ""
     business_type: int = BIZ_OTHER
+    # 除 perm 外还必须同时具备的权限（例如同时读用户和角色的工具）。perm 仍是执行时的权限上下文（数据范围按它计算）
+    extra_perms: tuple[str, ...] = ()
+
+    @property
+    def perms(self) -> tuple[str, ...]:
+        """绑定、执行前校验、能力边界都按这里的全部权限判断"""
+        return (self.perm, *self.extra_perms)
 
 
 def _since(days: int) -> datetime:
@@ -133,13 +143,26 @@ class GetUserDetailArgs(ToolArgs):
 MSG_USER_UNAVAILABLE = "该用户不存在或不在你的数据范围内"
 
 
-def _get_user_detail(db: Session, login_user: dict, args: GetUserDetailArgs) -> dict:
-    users = user_service.find_users_by_name(db, args.user_name)
+def _resolve_user(db: Session, login_user: dict, user_name: str):
+    """
+    按登录账号精确解析未删除的唯一用户，并按 login_user 的权限上下文校验数据范围。
+    不存在、重名、范围外都抛同一句话（get_user_detail、check_user_permission 共用）
+    """
+    users = user_service.find_users_by_name(db, user_name)
     if len(users) != 1:
         raise ServiceException(MSG_USER_UNAVAILABLE)
     try:
-        # get_user_detail 内部先做 check_user_data_scope（按 system:user:query 计算数据范围）
-        detail = user_service.get_user_detail(db, login_user, users[0].user_id)
+        user_service.check_user_data_scope(db, login_user, users[0].user_id)
+    except ServiceException:
+        raise ServiceException(MSG_USER_UNAVAILABLE) from None
+    return users[0]
+
+
+def _get_user_detail(db: Session, login_user: dict, args: GetUserDetailArgs) -> dict:
+    user = _resolve_user(db, login_user, args.user_name)
+    try:
+        # get_user_detail 内部会再做一次 check_user_data_scope（按 system:user:query 计算数据范围）
+        detail = user_service.get_user_detail(db, login_user, user.user_id)
     except ServiceException:
         raise ServiceException(MSG_USER_UNAVAILABLE) from None
     role_names = {r["roleId"]: r["roleName"] for r in detail.get("roles", [])}
@@ -286,6 +309,52 @@ def _get_role_permissions(db: Session, login_user: dict, args: GetRolePermission
     return ToolOutput(data, note="".join(notes))
 
 
+class CheckUserPermissionArgs(ToolArgs):
+    user_name: str = Field(min_length=1, max_length=30, description="目标用户的登录账号（精确匹配）")
+    perm: str = Field(min_length=5, max_length=100, pattern=PERM_PATTERN.pattern,
+                      description="要判断的权限字符，例如 agent:chat:use")
+
+
+NOTE_USER_PERM_SESSION = ("这是按数据库中的用户角色和菜单授权做出的判断，只计算状态正常的角色和菜单；"
+                          "不等于该用户当前登录会话里的权限：授权或角色变更后，已登录的用户通常要重新登录才会更新。")
+NOTE_SUPER_ADMIN = "目标用户是超级管理员，拥有全部权限。"
+NOTE_HIDDEN_ROLES = "目标用户另有 {count} 个角色不在你的数据范围内，未列出名称，但已参与判断。"
+
+
+def _check_user_permission(db: Session, login_user: dict, args: CheckUserPermissionArgs) -> ToolOutput:
+    """
+    服务端判断目标用户的当前角色是否具备某个权限，规则与登录时加载权限一致（login_service.build_login_user）：
+    只算未删除且状态正常的角色、状态正常的菜单；超级管理员角色本身不提供权限，userId=1 拥有全部权限（与 has_perm 一致）。
+    只返回结论和相关角色名，不返回完整权限列表；角色名只列出在操作者角色数据范围内的，其余只给数量
+    """
+    user = _resolve_user(db, login_user, args.user_name)   # login_user 的权限上下文是 system:user:query
+    role_scoped = check_perm(login_user, "system:role:query")
+    checked, matched, hidden = [], [], 0
+    is_super = user.user_id == SUPER_ADMIN_ID
+    has_perm = is_super
+    for role in role_service.list_user_roles(db, user.user_id):
+        active = role.status == STATUS_NORMAL and role.role_id != SUPER_ADMIN_ROLE_ID
+        has = active and args.perm in menu_service.list_role_perms(db, role.role_id)
+        # 结论按全部角色计算；只是范围外的角色不列名称
+        has_perm = has_perm or has
+        try:
+            role_service.check_role_data_scope(db, role_scoped, role.role_id)
+        except ServiceException:
+            hidden += 1
+            continue
+        checked.append({"roleName": role.role_name, "status": role.status})
+        if has:
+            matched.append({"roleName": role.role_name})
+    notes = [NOTE_USER_PERM_SESSION]
+    if is_super:
+        notes.append(NOTE_SUPER_ADMIN)
+    if hidden:
+        notes.append(NOTE_HIDDEN_ROLES.format(count=hidden))
+    data = {"targetUser": user.user_name, "perm": args.perm, "hasPerm": has_perm,
+            "matchedRoles": matched, "checkedRoles": checked}
+    return ToolOutput(data, note="".join(notes))
+
+
 # ---------------------------------------------------------------------------
 # 写工具：模型调用后只生成 PENDING 审批（预览见 write_tools.py），用户批准后服务端才执行
 # ---------------------------------------------------------------------------
@@ -340,9 +409,15 @@ _TOOL_LIST = [
              "先用它获取判定规则，再用业务工具确认实时状态；知识库只说明规则，不代表实时数据",
              RISK_READ, AGENT_CHAT_PERM, SearchKnowledgeArgs, _search_knowledge,
              ("docId", "title", "section", "chunkId", "snippet", "score")),
+    # 同时读用户和角色：两项权限都要有；数据范围的权限上下文是 system:user:query（解析用户），角色可见性另按 system:role:query
+    ToolSpec("check_user_permission",
+             "判断某个用户当前的角色配置是否具备某个权限（服务端按状态正常的角色和菜单计算）。"
+             "判断某用户有没有某权限时优先用它，不需要自己挑角色查询",
+             RISK_READ, "system:user:query", CheckUserPermissionArgs, _check_user_permission,
+             ("targetUser", "perm", "hasPerm", "matchedRoles", "checkedRoles"), extra_perms=("system:role:query",)),
     ToolSpec("get_role_permissions",
-             "按角色名称查询角色状态、数据范围和已授权的权限字符（数据库配置，受数据权限限制）。"
-             "判断角色是否具备某个权限时，优先传 perm 参数，由服务端按完整列表判断",
+             "按角色名称查询已知角色本身的状态、数据范围和已授权的权限字符（数据库配置，受数据权限限制）。"
+             "只用于查询已知的角色；判断某个用户有没有某权限用 check_user_permission。判断角色是否具备某个权限时传 perm 参数",
              RISK_READ, "system:role:query", GetRolePermissionsArgs, _get_role_permissions,
              ("roleId", "roleName", "roleKey", "status", "dataScope", "permCount", "perms", "truncated",
               "checkedPerm", "hasPerm")),
@@ -375,6 +450,7 @@ TOOL_TITLES = {
     "list_online_sessions": "查询在线会话",
     "search_knowledge": "检索知识库",
     "get_role_permissions": "查询角色权限",
+    "check_user_permission": "判断用户是否具备某权限",
     "change_user_status": "启用/停用用户账号",
     "unlock_user_account": "解除账号锁定",
     "force_logout_user": "强制下线",
