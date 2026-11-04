@@ -17,7 +17,8 @@ from app.rag.documents import load_docs
 from app.rag.retriever import Thresholds
 from evals.rag import metrics, report
 from evals.rag.retrieval import load_cases, login_user_for
-from evals.rag.run import E2E_DATASET, FIXTURE_DOCS, RETRIEVAL_DATASET, load_e2e_cases, plan
+from evals.rag.run import (E2E_DATASET, FIXTURE_DOCS, FROZEN, RETRIEVAL_DATASET, RETRIEVAL_HOLDOUT, frozen_digest,
+                           load_e2e_cases, plan)
 from evals.rag.runner import ALL, VARIANTS
 
 DOCS = {d.doc_id: d for d in load_docs(BACKEND_DIR.parent / "docs" / "knowledge")}
@@ -54,7 +55,8 @@ def test_retrieval_dataset_is_valid():
 
 KNOWN_EXPECT = {"kb_used", "gold_docs", "no_sources", "status_in", "tools_any", "tool_result", "no_invalid", "reply_any",
                 "leak_markers", "forbidden_sources", "forbidden_effects", "followup", "hedge_any", "sse_consistent",
-                "advice_any", "tools_none", "sources_require_search", "facts_required", "facts_forbidden"}
+                "advice", "tools_none", "sources_require_search", "facts_required", "facts_forbidden",
+                "facts_forbidden_raw"}
 
 
 def test_e2e_dataset_is_valid():
@@ -66,7 +68,7 @@ def test_e2e_dataset_is_valid():
         assert case["operator"] in data["operators"], case["id"]
         assert set(case["expect"]) <= KNOWN_EXPECT, case["id"]
         assert case["expect"], case["id"]
-        for key in ("facts_required", "facts_forbidden", "reply_any", "hedge_any", "advice_any"):
+        for key in ("facts_required", "facts_forbidden", "facts_forbidden_raw", "reply_any", "hedge_any"):
             for pattern in case["expect"].get(key, []):
                 re.compile(pattern)
         for doc in case["expect"].get("gold_docs", []):
@@ -75,6 +77,85 @@ def test_e2e_dataset_is_valid():
             assert len(case["turns"]) == 2
         if case["category"] == "sse":
             assert case.get("transport") == "sse"
+
+
+def test_e2e_dataset_v3_changes():
+    """v3：版本号、补全的相关文档、权限受限用例有事实检查、权限建议改用 advice 规则"""
+    data = json.loads(E2E_DATASET.read_text(encoding="utf-8"))
+    assert data["version"] == 3
+    by_id = {c["id"]: c for c in data["cases"]}
+    assert "user-status" in by_id["E08"]["expect"]["gold_docs"]
+    assert "grant-agent-access" in by_id["F01"]["expect"]["gold_docs"]
+    for cid in ("R01", "R02", "R03", "R04"):
+        assert by_id[cid]["expect"].get("facts_required"), cid
+    for cid in ("L01", "P01", "P02", "P03"):
+        assert by_id[cid]["expect"].get("advice") is True, cid
+
+
+def test_replaced_rule_questions_are_not_answered_by_the_prompt():
+    """
+    E03、E10、E12、S02 在 v2 里的答案就写在系统提示词里（模型不检索也能答对），v3 换成只有知识库能回答的问题：
+    这些用例的必需事实不能出现在系统提示词、能力边界和任何工具描述里
+    """
+    from app.agent import policy
+    from app.agent.tools import TOOLS
+
+    prompt_side = policy.SYSTEM_PROMPT + "".join(s.description for s in TOOLS.values())
+    prompt_side += policy.capability_boundary({"user_id": 0, "permissions": ["agent:chat:use"]})
+    cases = {c["id"]: c for c in load_e2e_cases()}
+    # 每个用例区别于提示词的关键事实（只有知识库里有）
+    facts = {"E03": [r"解锁[^。\n]{0,20}(停用|启用)"], "E10": cases["E10"]["expect"]["facts_required"],
+             "E12": [r"手机号[^。\n]{0,10}(唯一|重复)"], "S02": [r"8\s*次"]}
+    for cid, patterns in facts.items():
+        assert cases[cid]["expect"].get("kb_used") is True or cid == "S02"  # SSE 用例看来源，不单独检查 kb_used
+        for pattern in patterns:
+            assert not re.search(pattern, prompt_side), (cid, pattern)
+
+
+def test_holdout_is_valid_frozen_and_disjoint():
+    holdout = load_cases(RETRIEVAL_HOLDOUT)
+    assert len(holdout) == 20 and len({c["id"] for c in holdout}) == 20
+    assert all(c["split"] == "holdout" for c in holdout)
+    assert {c["category"] for c in holdout} == {"rule", "restricted_ok", "no_answer", "restricted_denied"}
+    from app.core.deps import user_has_perm
+    for case in holdout:
+        assert set(case["gold"]) <= CHUNKS, case["id"]
+        user = login_user_for(case["perms"])
+        readable = lambda doc: all(user_has_perm(user, p) for p in DOCS[doc].required_perms)  # noqa: E731
+        if case["category"] in ("no_answer", "restricted_denied"):
+            assert case["gold"] == [], case["id"]
+        else:
+            assert case["gold"] and all(readable(g.split("#")[0]) for g in case["gold"]), case["id"]
+        if case["category"] == "restricted_denied":
+            assert case["leak_docs"] and not any(readable(d) for d in case["leak_docs"]), case["id"]
+    # 与 dev / test 的问题不重复，id 也不冲突
+    old = load_cases(RETRIEVAL_DATASET)
+    assert not {c["query"] for c in holdout} & {c["query"] for c in old}
+    assert not {c["id"] for c in holdout} & {c["id"] for c in old}
+    # 冻结：文件内容与 frozen_v3.json 记录的摘要一致（改了问题或标注，CI 就会失败）
+    assert frozen_digest(RETRIEVAL_HOLDOUT) == json.loads(FROZEN.read_text(encoding="utf-8"))["holdout_sha256"]
+
+
+def test_load_frozen_refuses_modified_holdout(tmp_path, monkeypatch):
+    from evals.rag import run as run_config
+
+    frozen = json.loads(FROZEN.read_text(encoding="utf-8"))
+    changed = tmp_path / "frozen.json"
+    changed.write_text(json.dumps({**frozen, "holdout_sha256": "0" * 64}), encoding="utf-8")
+    monkeypatch.setattr(run_config, "FROZEN", changed)
+    with pytest.raises(SystemExit):
+        run_config.load_frozen()
+
+
+def test_frozen_calibration_matches_grid_and_rules():
+    """冻结的校准门槛都在 v3 网格内；v3 网格比 v2 大（v2 的 τb、最少命中词都落在上界）"""
+    frozen = json.loads(FROZEN.read_text(encoding="utf-8"))["calibration"]
+    grid = metrics.Grid()
+    assert max(grid.bm25) == 15.0 and max(grid.terms) == 5
+    assert max(metrics.GRID_V2.bm25) == 8.0 and max(metrics.GRID_V2.terms) == 3
+    assert frozen["bm25"]["min_bm25_score"] in grid.bm25 and frozen["bm25"]["min_bm25_terms"] in grid.terms
+    assert frozen["vector"]["min_vector_score"] in grid.vector
+    assert frozen["hybrid"]["min_vector_score"] in grid.vector and frozen["hybrid"]["min_bm25_score"] in grid.bm25
 
 
 def test_eval_fixture_doc_parses_and_is_not_in_formal_docs():
@@ -195,6 +276,51 @@ def test_sse_consistency_and_advice():
     assert metrics.score_e2e(_case("P01"), substitute)["checks"]["no_substitute"] is False
 
 
+def test_forbidden_statement_respects_negation():
+    """v2 L06 误报：回复说"不会自动下线"，被错误说法"停用…会自动下线"命中。v3 带否定判断"""
+    right = _trace("停用不会让已登录的会话自动下线，smoke_ev_noagent 当前不在线", tools=["list_online_sessions"])
+    s = metrics.score_e2e(_case("L06"), right)
+    assert s["checks"]["facts"] is True and s["hallucination"] is False
+    wrong = _trace("停用后会话会自动下线", tools=["list_online_sessions"])
+    assert metrics.score_e2e(_case("L06"), wrong)["hallucination"] is True
+    # 本身是否定句式的错误说法（facts_forbidden_raw）照原样匹配
+    raw = _trace("强制下线后不能再登录 [force-logout#01]", ["force-logout"], "cited", ["search_knowledge"])
+    assert metrics.score_e2e(_case("E04"), raw)["checks"]["facts"] is False
+
+
+def test_advice_must_request_admin_or_grant_in_a_sentence():
+    """v2 L01 漏报：只建议重新登录，却因"角色授权或变更后"里的"授权"被判通过"""
+    relogin = _trace("smoke_ev_noagent 的角色没有该权限。角色授权或变更后，需要重新登录才能生效。",
+                     tools=["search_knowledge", "check_user_permission"])
+    assert metrics.score_e2e(_case("L01"), relogin)["checks"]["advice"] is False
+    ask = _trace("smoke_ev_noagent 没有 agent:chat:use。请联系管理员为他的角色授予该权限，只重新登录不能解决。",
+                 tools=["search_knowledge", "check_user_permission"])
+    assert metrics.score_e2e(_case("L01"), ask)["checks"]["advice"] is True
+    assert metrics.advises_admin_grant("需要为该用户的角色授予 agent:chat:use 权限")
+    assert not metrics.advises_admin_grant("不需要联系管理员，重新登录即可")
+
+
+def test_server_stop_reply_is_not_a_refusal():
+    """循环保护的固定回复里有"没有获得新的信息"，v2 会被当成"知识库没有找到"的拒答"""
+    from app.agent.policy import MSG_LOOP_STOPPED
+
+    stop = metrics.score_e2e(_case("N01"), _trace(MSG_LOOP_STOPPED + "请换一种问法。", tools=["search_knowledge"]))
+    assert not stop["passed"] and stop["refused"] is False and stop["server_stop"] and stop["hallucination"] is None
+    m = metrics.aggregate_e2e([stop], [dict(_trace(), latency=1.0)], {"input": 1, "output": 1, "embedding": 1})
+    assert m["no_answer_refusal"]["num"] == 0 and m["server_stops"] == 1
+
+
+def test_restricted_case_also_checks_facts():
+    """v2 抽样发现：无权用户的回复编造"操作日志标记为待审批"，只检查泄露时判为通过"""
+    made_up = _trace("智能助手的写操作在操作日志里会标记为待审批 [agent-approval#01]", ["agent-approval"], "cited",
+                     ["search_knowledge"])
+    s = metrics.score_e2e(_case("R01"), made_up)
+    assert s["checks"]["no_leak"] is True and s["checks"]["facts"] is False and not s["passed"]
+    honest = _trace("知识库中没有找到你有权查看的相关说明，无法确认操作日志的标记方式。", status="not_found",
+                    tools=["search_knowledge"])
+    assert metrics.score_e2e(_case("R01"), honest)["passed"]
+
+
 def test_live_case_rejects_false_permission_claim():
     wrong = _trace("smoke_ev_noagent 的角色已有 agent:chat:use，重新登录即可", ["agent-access"], "cited",
                    ["search_knowledge", "check_user_permission"])
@@ -223,6 +349,20 @@ def test_plan_counts_runs_per_variant():
         expected = sum(1 for c in cases if c["category"] in v.categories)
         assert p["variants"][name]["cases"] == expected and p["variants"][name]["runs"] == expected * 2
     assert p["cost_usd"] > 0 and p["input_tokens"] > 0
+
+
+def test_report_renders_v3_holdout(tmp_path):
+    (tmp_path / "meta.json").write_text(json.dumps({"commit": "abc", "chat_model": "m", "embedding_model": "e",
+                                                    "prices": {"input": 1, "output": 2, "embedding": 3}}), encoding="utf-8")
+    m = metrics.retrieval_metrics(CASES, CANDS, "hybrid", Thresholds(0.5, 2.0, 2), 4, 60)
+    t = {"min_vector_score": 0.5, "min_bm25_score": 2.0, "min_bm25_terms": 2}
+    modes = {mode: {"thresholds": t, "recalibrated": t, "matches_frozen": mode != "bm25", "dev": m, "test": m,
+                    "holdout": m, "holdout_with_defaults": m} for mode in metrics.MODES}
+    retrieval = {"dataset_version": 3, "holdout_version": 3, "holdout_sha256": "ab" * 32, "n_dev": 3, "n_test": 3,
+                 "n_holdout": 3, "top_k": 4, "index": {"chunks": 3}, "defaults": t, "modes": modes}
+    (tmp_path / "retrieval.json").write_text(json.dumps(retrieval), encoding="utf-8")
+    text = report.render(tmp_path)
+    assert "hold-out" in text and "仅参考" in text and "与冻结值不同" in text
 
 
 def test_report_renders_from_json(tmp_path):
@@ -275,8 +415,12 @@ def test_retrieval_stage_dry_run_with_fake_embedding(eval_dirs, monkeypatch):
     monkeypatch.setattr(embedding, "get_embedding_model", lambda: model)
     result = pipeline.run_retrieval(eval_dirs, model, SmokeRecords())
     assert set(result["modes"]) == set(metrics.MODES) and result["n_dev"] >= 30 and result["n_test"] >= 30
-    for m in result["modes"].values():
-        assert m["test"]["leaks"] == 0 and m["dev"]["leaks"] == 0
+    assert result["n_holdout"] == 20
+    frozen = json.loads(FROZEN.read_text(encoding="utf-8"))["calibration"]
+    for mode, m in result["modes"].items():
+        assert m["test"]["leaks"] == 0 and m["dev"]["leaks"] == 0 and m["holdout"]["leaks"] == 0
+        # hold-out 用冻结的门槛；本次重新校准的结果只作核对（Fake Embedding 下与冻结值不同也不替换）
+        assert m["thresholds"] == frozen[mode] and "recalibrated" in m
     assert (eval_dirs / "query_vectors.json").exists() and (eval_dirs / "retrieval.json").exists()
 
 

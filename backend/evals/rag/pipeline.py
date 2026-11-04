@@ -2,9 +2,11 @@
 评估流程（由 run.py 在设置好测试库环境变量之后导入）：
 
 1. 重建测试库（若依 + 智能助手 + 知识库表），关闭验证码；
-2. 检索评估：用配置的 Embedding 建索引（只含正式文档），每个问题算一次向量并缓存，
-   收集可读集合内的两路候选，在 dev 上按方式分别校准门槛，在 test 上报告（同时给出当前默认门槛在 test 上的结果作对照）；
-3. 端到端评估：索引加入评估专用的注入文档，门槛使用第 2 步在 dev 上校准的值（没有就用当前配置，并在报告里写明），
+2. 检索评估（v3）：先校验 hold-out 集与冻结时一致；用配置的 Embedding 建索引（只含正式文档），每个问题算一次向量并缓存，
+   收集可读集合内的两路候选。各方式的门槛使用 frozen_v3.json 里运行前冻结的 dev 校准值，在 hold-out 上报告；
+   同时在本次 dev 候选上按同一网格重新校准一次，只用来核对是否与冻结值一致（不一致只记录，不替换）。
+   v2 的 test 已经看过，只作参考列出；
+3. 端到端评估：索引加入评估专用的注入文档，门槛使用第 2 步的冻结值（本目录没有检索结果时用当前配置，并在报告里写明），
    按方案逐条运行、评分、汇总，导出人工核对清单；
 4. 无论成功失败，按记录物理删除 smoke_ev_ 数据、会话、审批记录、知识库行、登录态和频率限制计数。
 """
@@ -26,7 +28,7 @@ from app.services import knowledge_service
 from evals import environment as env
 from evals.rag import metrics, report, retrieval, runner
 from evals.rag import run as run_config
-from evals.rag.run import E2E_DATASET, FIXTURE_DOCS, PRICES, RETRIEVAL_DATASET, load_e2e_cases
+from evals.rag.run import E2E_DATASET, FIXTURE_DOCS, PRICES, RETRIEVAL_DATASET, RETRIEVAL_HOLDOUT, load_e2e_cases
 from evals.rag_smoke import SmokeRecords, cleanup_smoke_data
 from evals.run_eval import _git_commit
 from scripts.init_db import AGENT_SQL_FILE, KNOWLEDGE_SQL_FILE, create_database_if_not_exists, import_sql_file
@@ -86,8 +88,10 @@ def _thresholds_dict(t: Thresholds) -> dict:
 
 
 def run_retrieval(out_dir: Path, model, records: SmokeRecords) -> dict:
+    frozen = run_config.load_frozen()   # hold-out 被改过就在调用任何 API 之前停止
     index = _build(DOCS_DIR, model, records)
-    cases = retrieval.load_cases(RETRIEVAL_DATASET)
+    holdout = retrieval.load_cases(RETRIEVAL_HOLDOUT)
+    cases = retrieval.load_cases(RETRIEVAL_DATASET) + holdout
     vectors = retrieval.embed_queries(cases, model, out_dir / "query_vectors.json")
     db = SessionLocal()
     try:
@@ -98,15 +102,22 @@ def run_retrieval(out_dir: Path, model, records: SmokeRecords) -> dict:
     test = [c for c in cases if c["split"] == "test"]
     defaults = knowledge_service.current_thresholds()
     result = {"index": index, "dataset_version": json.loads(RETRIEVAL_DATASET.read_text(encoding="utf-8"))["version"],
-              "n_dev": len(dev), "n_test": len(test), "top_k": KNOWLEDGE_TOP_K, "defaults": _thresholds_dict(defaults),
-              "modes": {}}
+              "holdout_version": json.loads(RETRIEVAL_HOLDOUT.read_text(encoding="utf-8"))["version"],
+              "holdout_sha256": frozen["holdout_sha256"],
+              "n_dev": len(dev), "n_test": len(test), "n_holdout": len(holdout), "top_k": KNOWLEDGE_TOP_K,
+              "defaults": _thresholds_dict(defaults), "modes": {}}
+
+    def measure(subset, t):
+        return metrics.retrieval_metrics(subset, candidates, mode, t, KNOWLEDGE_TOP_K, KNOWLEDGE_RRF_K)
+
     for mode in metrics.MODES:
-        # 校准只看 dev；test 只用来报告校准后的门槛和默认门槛的效果
-        tuned, dev_m = metrics.calibrate(dev, candidates, mode, KNOWLEDGE_TOP_K, KNOWLEDGE_RRF_K)
-        test_m = metrics.retrieval_metrics(test, candidates, mode, tuned, KNOWLEDGE_TOP_K, KNOWLEDGE_RRF_K)
-        default_m = metrics.retrieval_metrics(test, candidates, mode, defaults, KNOWLEDGE_TOP_K, KNOWLEDGE_RRF_K)
-        result["modes"][mode] = {"thresholds": _thresholds_dict(tuned), "dev": dev_m, "test": test_m,
-                                 "test_with_defaults": default_m}
+        # 报告用的门槛是运行前冻结的 dev 校准值；这里在本次 dev 候选上重新校准只为核对，不替换冻结值
+        fixed = Thresholds(**frozen["calibration"][mode])
+        recalibrated, _ = metrics.calibrate(dev, candidates, mode, KNOWLEDGE_TOP_K, KNOWLEDGE_RRF_K)
+        result["modes"][mode] = {"thresholds": _thresholds_dict(fixed), "recalibrated": _thresholds_dict(recalibrated),
+                                 "matches_frozen": recalibrated == fixed,
+                                 "dev": measure(dev, fixed), "test": measure(test, fixed),
+                                 "holdout": measure(holdout, fixed), "holdout_with_defaults": measure(holdout, defaults)}
     (out_dir / "candidates.json").write_text(json.dumps(candidates, ensure_ascii=False), encoding="utf-8")
     (out_dir / "retrieval.json").write_text(json.dumps(result, ensure_ascii=False, indent=1), encoding="utf-8")
     return result

@@ -27,18 +27,37 @@ def _recall(m: dict, k: int):
     return m["recall"].get(str(k), m["recall"].get(k))
 
 
+def _thr(t: dict) -> str:
+    return " / ".join("—" if v >= 1e8 or v == 99 else str(v) for v in
+                      (t["min_vector_score"], t["min_bm25_score"], t["min_bm25_terms"]))
+
+
 def retrieval_section(r: dict) -> str:
-    lines = [f"- 数据集版本 {r['dataset_version']}：dev {r['n_dev']} 条（只用于校准），test {r['n_test']} 条（只用于报告）；"
-             f"返回条数 top_k={r['top_k']}；索引 {r['index']['chunks']} 个分块。",
-             f"- 当前默认门槛：τv={r['defaults']['min_vector_score']}，τb={r['defaults']['min_bm25_score']}，"
-             f"最少命中词数={r['defaults']['min_bm25_terms']}。", "",
+    if "n_holdout" in r:
+        # v3：门槛是运行前冻结的 dev 校准值，最终结果看 hold-out；test 已在 v2 报告里看过，只作参考
+        head = [f"- 数据集：dev {r['n_dev']} 条（只用于校准）、test {r['n_test']} 条（v2 已看过，仅参考）、"
+                f"hold-out {r['n_holdout']} 条（v{r['holdout_version']}，运行前冻结，sha256 {r['holdout_sha256'][:12]}…，最终结果）；"
+                f"返回条数 top_k={r['top_k']}；索引 {r['index']['chunks']} 个分块。",
+                f"- 生产默认门槛：τv={r['defaults']['min_vector_score']}，τb={r['defaults']['min_bm25_score']}，"
+                f"最少命中词数={r['defaults']['min_bm25_terms']}。"]
+        for mode, m in r["modes"].items():
+            if not m["matches_frozen"]:
+                head.append(f"- **{MODE_NAMES[mode]}**：本次 dev 候选重新校准得到 {_thr(m['recalibrated'])}，与冻结值不同；"
+                            f"报告仍使用冻结值。")
+        rows = (("dev", "dev"), ("test（已看过，仅参考）", "test"), ("**hold-out**", "holdout"),
+                ("hold-out（生产默认门槛）", "holdout_with_defaults"))
+    else:
+        head = [f"- 数据集版本 {r['dataset_version']}：dev {r['n_dev']} 条（只用于校准），test {r['n_test']} 条（只用于报告）；"
+                f"返回条数 top_k={r['top_k']}；索引 {r['index']['chunks']} 个分块。",
+                f"- 当前默认门槛：τv={r['defaults']['min_vector_score']}，τb={r['defaults']['min_bm25_score']}，"
+                f"最少命中词数={r['defaults']['min_bm25_terms']}。"]
+        rows = (("dev", "dev"), ("**test**", "test"), ("test（默认门槛）", "test_with_defaults"))
+    lines = [*head, "",
              "| 方式 | dev 校准门槛（τv / τb / 最少命中词） | 集合 | Recall@1 | Recall@3 | Recall@5 | MRR | 无答案拒答率 | 有答案却无结果 | 权限泄露 |",
              "|---|---|---|---|---|---|---|---|---|---|"]
     for mode, m in r["modes"].items():
-        t = m["thresholds"]
-        thr = " / ".join("—" if v >= 1e8 or v == 99 else str(v) for v in
-                         (t["min_vector_score"], t["min_bm25_score"], t["min_bm25_terms"]))
-        for label, key in (("dev", "dev"), ("**test**", "test"), ("test（默认门槛）", "test_with_defaults")):
+        thr = _thr(m["thresholds"])
+        for label, key in rows:
             x = m[key]
             recall = " | ".join(_num(_recall(x, k)) for k in (1, 3, 5))
             lines.append(f"| {MODE_NAMES[mode]} | {thr if key == 'dev' else ''} | {label} | {recall} | {_num(x['mrr'])} | "
@@ -55,7 +74,7 @@ def e2e_section(e: dict) -> str:
         ("无答案拒答率", lambda m: _pct(m["no_answer_refusal"])),
         ("幻觉率（规则判定）", lambda m: _pct(m["hallucination"])),
         ("引用准确率", lambda m: _pct(m["citation_accuracy"])),
-        ("auto_cited 占有引用回复的比例", lambda m: _pct(m["auto_cited_share"])),
+        ("服务端固定回复（循环保护等，不计拒答）", lambda m: str(m.get("server_stops", 0))),
         ("suspiciousCitations 合计", lambda m: str(m["suspicious_citations"])),
         ("invalidCitations 合计", lambda m: str(m["invalid_citations"])),
         ("权限泄露（次）", lambda m: str(m["permission_leaks"])),
@@ -105,7 +124,7 @@ def manual_review(cases: list[dict], traces: list[dict], scored: list[dict]) -> 
              "规则判定只覆盖 facts_required / facts_forbidden 能表达的事实；下面每条请人工标注"
              "\"事实一致 / 部分一致 / 不一致\"，并核对引用的片段是否支撑对应句子。", ""]
     for t in traces:
-        if t["category"] not in ("rule", "live", "followup", "forged"):
+        if t["category"] not in ("rule", "live", "followup", "forged", "restricted", "perm_advice"):
             continue
         s = verdicts[(t["case_id"], t["variant"], t["run"])]
         snippets = {row.get("chunkId"): row.get("snippet", "")
@@ -117,7 +136,7 @@ def manual_review(cases: list[dict], traces: list[dict], scored: list[dict]) -> 
                   f"- 规则判定：{'通过' if s['passed'] else '未通过'}；事实规则：{s.get('facts_ok')}；幻觉（规则）：{s.get('hallucination')}"]
         for i, turn in enumerate(t["turns"], start=1):
             lines += [f"- 第 {i} 轮回复（{turn['knowledgeStatus']}）：{turn['reply']}",
-                      f"  - 来源：{[x['chunkId'] for x in turn['sources']]}；自动关联：{[x['chunkId'] for x in turn['autoSources']]}"]
+                      f"  - 来源：{[x['chunkId'] for x in turn['sources']]}；无效引用：{turn.get('invalidCitations', 0)}"]
         for chunk_id, text in snippets.items():
             lines.append(f"  - 片段 {chunk_id}：{text}")
         lines += ["- 人工标注：（待填）", ""]

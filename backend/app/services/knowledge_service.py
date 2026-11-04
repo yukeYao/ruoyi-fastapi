@@ -317,6 +317,12 @@ def current_thresholds() -> Thresholds:
                       settings.knowledge_min_bm25_terms)
 
 
+def degraded_thresholds() -> Thresholds:
+    """向量检索不可用时的纯关键词门槛（向量门槛不起作用：没有向量候选）"""
+    return Thresholds(settings.knowledge_min_vector_score, settings.knowledge_degraded_min_bm25_score,
+                      settings.knowledge_degraded_min_bm25_terms)
+
+
 def readable(login_user: dict, chunk: ChunkRecord) -> bool:
     """required_perms 需全部满足；空表示所有智能助手用户可读。超级管理员（*:*:*）全部可读"""
     return all(user_has_perm(login_user, p) for p in chunk.required_perms)
@@ -377,6 +383,7 @@ def search_knowledge(db: Session, login_user: dict, query: str, top_k: int = KNO
     if not query:
         raise ServiceException(MSG_EMPTY_QUERY)
     top_k = max(1, min(int(top_k), KNOWLEDGE_MAX_TOP_K))
+    explicit = thresholds is not None
     thresholds = thresholds or current_thresholds()
     mode = mode or settings.knowledge_retrieval_mode
     if mode not in RETRIEVAL_MODES:
@@ -398,6 +405,9 @@ def search_knowledge(db: Session, login_user: dict, query: str, top_k: int = KNO
     vector_hits, degraded = _vector_search(active, query, allowed) if mode != "bm25" else ([], False)
     # 防御：向量检索返回了可读集合以外的 ID（不应发生）就丢弃，而不是去分块表里查
     vector_hits = [(v, s) for v, s in vector_hits if v in by_vector]
+    if degraded and not explicit:
+        # 混合检索降级为纯关键词：换用 BM25 单独校准的门槛。调用方显式传了门槛（评估、测试）时照用
+        thresholds = degraded_thresholds()
 
     candidates: dict[str, Candidate] = {}
     for c, score, matched in bm25_hits:

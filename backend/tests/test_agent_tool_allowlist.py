@@ -81,12 +81,17 @@ def _search(kb, **kw):
     return knowledge_service.search_knowledge(kb, ADMIN, "智能助手菜单权限 agent:chat:use", **kw)
 
 
+# 夹具只有几篇小文档，BM25 分数远低于按正式知识库校准的生产门槛（混合 τb=15 / 5）；
+# 这里测的是检索方式开关，不是门槛，所以显式给一个夹具尺度的关键词门槛
+FIXTURE_BM25 = knowledge_service.Thresholds(1e9, 0.0, 1)
+
+
 def test_bm25_mode_never_calls_embedding(kb, monkeypatch):
     def boom():
         raise AssertionError("bm25 模式不应调用 Embedding")
 
     monkeypatch.setattr(embedding, "get_embedding_model", boom)
-    result = _search(kb, mode="bm25")
+    result = _search(kb, mode="bm25", thresholds=FIXTURE_BM25)
     assert result.hits and not result.degraded
     assert all(h.vector_score is None for h in result.hits)
 
@@ -107,7 +112,7 @@ def test_vector_mode_failure_has_no_keyword_fallback(kb, monkeypatch):
 def test_mode_from_settings_and_invalid_mode(kb, monkeypatch):
     monkeypatch.setattr(settings, "knowledge_retrieval_mode", "bm25")
     monkeypatch.setattr(embedding, "get_embedding_model", lambda: (_ for _ in ()).throw(AssertionError("不应调用")))
-    assert _search(kb).hits
+    assert _search(kb, thresholds=FIXTURE_BM25).hits
     with pytest.raises(ServiceException):
         _search(kb, mode="sql")
 

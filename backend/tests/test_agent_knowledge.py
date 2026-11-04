@@ -303,6 +303,10 @@ def test_embedding_failure_only_degrades_knowledge(kb, scripted_model, monkeypat
         raise EmbeddingError("Embedding 调用失败：APIConnectionError")
 
     monkeypatch.setattr(embedding, "get_embedding_model", broken)
+    # 夹具只有 3 篇小文档，BM25 分数远低于按正式知识库校准的降级门槛（8 / 3）；这里关注降级只影响知识检索，
+    # 门槛换成夹具尺度。降级门槛本身的行为见 test_knowledge_search.test_degraded_search_uses_degraded_thresholds
+    monkeypatch.setattr(settings, "knowledge_degraded_min_bm25_score", 0.0)
+    monkeypatch.setattr(settings, "knowledge_degraded_min_bm25_terms", 1)
     scripted_model(tool_msg(call("search_knowledge", {"query": "智能助手菜单权限 agent:chat:use"}, "s1"),
                             call("search_users", {"user_name": "admin"}, "u1")), final("好的"))
     body = chat(client, auth_headers(client), "查一下")

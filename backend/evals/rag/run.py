@@ -3,7 +3,7 @@
 
     cd backend
     python -m evals.rag.run --plan                         # 只打印数据集规模、调用次数和费用估算，不调用任何 API
-    python -m evals.rag.run --stage retrieval              # 检索评估：dev 校准门槛，test 报告
+    python -m evals.rag.run --stage retrieval              # 检索评估：v3 用冻结的 dev 校准门槛，在 hold-out 上报告
     python -m evals.rag.run --stage e2e --runs 2           # 端到端评估（使用同一目录里检索评估校准出的门槛）
     python -m evals.rag.run --stage all --runs 2
 
@@ -13,6 +13,7 @@
 - 不读取、不打印任何 Key；结果文件里也没有 Key。
 """
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -22,8 +23,24 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 RESULTS_DIR = HERE.parent / "results"
 RETRIEVAL_DATASET = HERE / "retrieval_dataset.json"
+RETRIEVAL_HOLDOUT = HERE / "retrieval_holdout.json"
+FROZEN = HERE / "frozen_v3.json"
 E2E_DATASET = HERE / "e2e_dataset.json"
 FIXTURE_DOCS = HERE / "fixtures"
+
+
+def frozen_digest(path: Path) -> str:
+    """冻结文件的摘要：换行统一成 \\n 再算 sha256（Windows 检出时 git 会把换行改成 CRLF，内容并没有变）"""
+    return hashlib.sha256(path.read_text(encoding="utf-8").replace("\r\n", "\n").encode("utf-8")).hexdigest()
+
+
+def load_frozen() -> dict:
+    """读取 v3 冻结清单并校验 hold-out 文件没有被改过；被改过就拒绝运行"""
+    frozen = json.loads(FROZEN.read_text(encoding="utf-8"))
+    actual = frozen_digest(HERE / frozen["holdout_file"])
+    if actual != frozen["holdout_sha256"]:
+        raise SystemExit(f"hold-out 集与冻结时不一致（{actual[:12]} != {frozen['holdout_sha256'][:12]}），停止运行")
+    return frozen
 
 # 按 OpenAI 公开价格（美元 / 百万 Token），运行前请核对；报告里注明这是估算
 PRICES = {"input": 0.15, "output": 0.60, "embedding": 0.02}
@@ -31,7 +48,7 @@ PRICES = {"input": 0.15, "output": 0.60, "embedding": 0.02}
 BUDGET_USD = 1.0
 BUDGET_INPUT_TOKENS = 5_000_000
 
-# 每类用例预计的模型调用次数（含可能的引用修复），用于 --plan 估算；来自此前冒烟的实测步数
+# 每类用例预计的模型调用次数，用于 --plan 估算；来自此前冒烟和 v2 评估的实测步数（v3 已没有引用修复调用）
 EXPECTED_CALLS = {"rule": 2.5, "live": 4.5, "no_answer": 2.5, "restricted": 2.5, "injection": 2.5, "forged": 2.5,
                   "followup": 5.0, "sse": 2.5, "perm_advice": 2.0}
 # 每次工具结果平均增加的输入 Token（知识库片段较长、业务工具结果较短），按冒烟实测反推
@@ -62,7 +79,7 @@ def plan(runs: int, variant_names: list[str]) -> dict:
         return prompt_chars / 1.4 + json_chars / 4
 
     e2e = load_e2e_cases()
-    retrieval = load_cases(RETRIEVAL_DATASET)
+    retrieval = load_cases(RETRIEVAL_DATASET) + load_cases(RETRIEVAL_HOLDOUT)
     out = {"retrieval_queries": len(retrieval), "e2e_cases": len(e2e), "runs": runs, "variants": {}}
     total_in = total_out = 0.0
     for name in variant_names:
@@ -93,7 +110,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--plan", action="store_true", help="只打印规模与费用估算，不调用任何 API")
     parser.add_argument("--stage", choices=["retrieval", "e2e", "all"])
     parser.add_argument("--runs", type=int, default=1)
-    parser.add_argument("--variants", nargs="+", default=["no_rag", "bm25", "vector", "hybrid", "hybrid_tools"])
+    # v3 只运行混合检索 + 业务工具；其他方案用于对照时显式指定
+    parser.add_argument("--variants", nargs="+", default=["hybrid_tools"])
     parser.add_argument("--cases", nargs="+", help="端到端只运行这些用例 id")
     parser.add_argument("--out", type=Path, help="复用已有的运行目录（例如先跑 retrieval、再跑 e2e）")
     parser.add_argument("--resume", action="store_true", help="端到端：跳过本目录已完成的运行，接着跑")

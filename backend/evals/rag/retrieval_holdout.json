@@ -1,0 +1,26 @@
+{
+  "version": 3,
+  "note": "检索评估 hold-out 集（2026-11-04 新增）。v2 的 test 已在报告中看过，不能再作为最终依据，这 20 条只用于 v3 最终检索报告：不参与校准，不在看到结果后修改问题、标注或门槛。gold 在任何真实运行之前按 docs/knowledge 原文标注；文件的 sha256 记在 frozen_v3.json，运行前校验，不一致就拒绝运行。字段含义与 retrieval_dataset.json 相同。",
+  "cases": [
+    {"id": "h01", "split": "holdout", "category": "rule", "perms": "admin", "query": "在登录日志页面点解锁，实际上清除的是什么", "gold": ["unlock-account#01", "password-lock#02"]},
+    {"id": "h02", "split": "holdout", "category": "rule", "perms": "admin", "query": "账号被停用了，给它解锁以后能登录吗", "gold": ["unlock-account#02", "user-status#01"]},
+    {"id": "h03", "split": "holdout", "category": "rule", "perms": "admin", "query": "审批期间目标账号被删掉又建了个同名的，批准后会怎样", "gold": ["soft-delete#02", "agent-approval#01"]},
+    {"id": "h04", "split": "holdout", "category": "rule", "perms": "admin", "query": "助手返回的邮箱地址会显示成什么样", "gold": ["agent-data-masking#01"]},
+    {"id": "h05", "split": "holdout", "category": "rule", "perms": "admin", "query": "查询结果太长的时候助手怎么处理", "gold": ["agent-limits#03"]},
+    {"id": "h06", "split": "holdout", "category": "rule", "perms": "admin", "query": "仅本人数据权限的角色能看到哪些用户", "gold": ["data-scope-types#01"]},
+    {"id": "h07", "split": "holdout", "category": "rule", "perms": "admin", "query": "有全部数据权限的角色却没有用户管理菜单，查用户列表时按哪个角色的范围算", "gold": ["data-scope-multi-role#02", "data-scope-multi-role#01"]},
+    {"id": "h08", "split": "holdout", "category": "rule", "perms": "admin", "query": "权限字符的格式是什么样的", "gold": ["role-menu-perm#01"]},
+    {"id": "h09", "split": "holdout", "category": "rule", "perms": "admin", "query": "登录时提示用户已封禁请联系管理员是什么原因", "gold": ["login-captcha#02", "user-status#01", "agent-access#02"]},
+    {"id": "h10", "split": "holdout", "category": "rule", "perms": "admin", "query": "登录验证码功能在哪里开启或关闭", "gold": ["login-captcha#01"]},
+    {"id": "h11", "split": "holdout", "category": "rule", "perms": "admin", "query": "用助手强制下线某个人，会不会把我自己的会话也踢掉", "gold": ["force-logout#02"]},
+    {"id": "h12", "split": "holdout", "category": "rule", "perms": "admin", "query": "停在执行中的写操作为什么不自动重试", "gold": ["agent-action-status#02"]},
+    {"id": "h13", "split": "holdout", "category": "rule", "perms": "admin", "query": "同一个上级部门下面能不能有两个同名的部门", "gold": ["unique-rules#01"]},
+    {"id": "h14", "split": "holdout", "category": "rule", "perms": "admin", "query": "超级管理员受不受数据权限的限制", "gold": ["super-admin#01", "data-scope-types#01"]},
+    {"id": "h15", "split": "holdout", "category": "no_answer", "perms": "admin", "query": "怎么更换登录页的背景图片", "gold": []},
+    {"id": "h16", "split": "holdout", "category": "no_answer", "perms": "admin", "query": "系统支持双因素认证吗", "gold": []},
+    {"id": "h17", "split": "holdout", "category": "no_answer", "perms": "admin", "query": "怎么设置用户密码的复杂度要求", "gold": []},
+    {"id": "h18", "split": "holdout", "category": "no_answer", "perms": "admin", "query": "如何对接 LDAP 统一认证", "gold": []},
+    {"id": "h19", "split": "holdout", "category": "restricted_ok", "perms": ["agent:chat:use", "system:role:edit"], "query": "初始化后哪个角色默认就有智能助手菜单", "gold": ["grant-agent-access#01"]},
+    {"id": "h20", "split": "holdout", "category": "restricted_denied", "perms": ["agent:chat:use"], "query": "登录日志里的登录地点能显示到具体城市吗", "gold": [], "leak_docs": ["login-log"]}
+  ]
+}

@@ -52,10 +52,16 @@ class Settings(BaseSettings):
     knowledge_index_path: str = "data/knowledge_index"
     # 混合检索的最低相关性门槛：分块至少满足一项才会返回——
     #   向量余弦相似度 >= τv，或（BM25 分数 >= τb 且命中的不同查询词 >= 最少命中词数）。
-    # 当前是未校准的初始值；阶段 4 只在评估开发集上校准，在独立测试集上报告，不能用同一批样本调参和汇报
-    knowledge_min_vector_score: float = 0.45
-    knowledge_min_bm25_score: float = 1.5
-    knowledge_min_bm25_terms: int = 2
+    # 取值是 v3 在评估 dev 集上的校准结果（text-embedding-3-small，见 evals/rag/frozen_v3.json 和 docs/rag-eval-report.md）：
+    # dev 上 BM25 这一路对混合检索的目标函数没有贡献，τb 在 [7.5, 15] 内结果相同，按"同分取更严"落在 15 / 5，
+    # 即混合检索里实际只靠向量路准入、BM25 只参与排序。换 Embedding 模型后需要重新校准
+    knowledge_min_vector_score: float = 0.5
+    knowledge_min_bm25_score: float = 15.0
+    knowledge_min_bm25_terms: int = 5
+    # 降级门槛：向量检索不可用、只剩关键词检索时使用（BM25 单独在 dev 上校准的结果）。
+    # 混合检索的 τb 是按"有向量路"校准的，直接用于纯关键词检索会几乎什么都返回不了
+    knowledge_degraded_min_bm25_score: float = 8.0
+    knowledge_degraded_min_bm25_terms: int = 3
     # 检索方式：hybrid（BM25 + 向量，RRF 合并）、bm25、vector。默认 hybrid；另外两种用于评估对照
     knowledge_retrieval_mode: str = "hybrid"
 

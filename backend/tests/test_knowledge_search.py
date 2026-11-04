@@ -331,6 +331,46 @@ def test_embedding_model_mismatch_degrades(kb, monkeypatch):
     assert result.degraded and result.note == NOTE_DEGRADED
 
 
+def test_degraded_search_uses_degraded_thresholds(kb, monkeypatch):
+    """
+    混合检索降级为纯关键词时，用 BM25 单独校准的降级门槛，而不是按"有向量路"校准的混合门槛；
+    调用方显式传入门槛（评估、测试）时照用传入的
+    """
+    monkeypatch.setattr(embedding, "get_embedding_model", embedding.create_embedding_model)  # 未配置 -> 降级
+    query = "停用账号 强制下线"
+    monkeypatch.setattr(settings, "knowledge_min_bm25_score", 0.0)
+    monkeypatch.setattr(settings, "knowledge_min_bm25_terms", 0)
+    monkeypatch.setattr(settings, "knowledge_degraded_min_bm25_score", 1e9)
+    kb["db"].rollback()
+    blocked = knowledge_service.search_knowledge(kb["db"], PLAIN_USER, query)
+    assert blocked.degraded and blocked.hits == ()
+    monkeypatch.setattr(settings, "knowledge_degraded_min_bm25_score", 0.0)
+    monkeypatch.setattr(settings, "knowledge_degraded_min_bm25_terms", 1)
+    monkeypatch.setattr(settings, "knowledge_min_bm25_score", 1e9)
+    allowed = knowledge_service.search_knowledge(kb["db"], PLAIN_USER, query)
+    assert allowed.degraded and allowed.hits
+    # 显式门槛优先：即使降级门槛放得很宽，传入严格门槛也照用
+    strict = knowledge_service.search_knowledge(kb["db"], PLAIN_USER, query, thresholds=Thresholds(2.0, 1e9, 99))
+    assert strict.degraded and strict.hits == ()
+
+
+def test_production_defaults_are_v3_dev_calibration():
+    """生产默认门槛 = v3 在 dev 上的校准值（frozen_v3.json）：混合检索用 hybrid 校准值，降级用 BM25 校准值"""
+    import json
+
+    from app.config import BACKEND_DIR, Settings
+
+    frozen = json.loads((BACKEND_DIR / "evals" / "rag" / "frozen_v3.json").read_text(encoding="utf-8"))["calibration"]
+    fields = Settings.model_fields
+    assert (fields["knowledge_min_vector_score"].default, fields["knowledge_min_bm25_score"].default,
+            fields["knowledge_min_bm25_terms"].default) == (frozen["hybrid"]["min_vector_score"],
+                                                            frozen["hybrid"]["min_bm25_score"],
+                                                            frozen["hybrid"]["min_bm25_terms"])
+    assert (fields["knowledge_degraded_min_bm25_score"].default,
+            fields["knowledge_degraded_min_bm25_terms"].default) == (frozen["bm25"]["min_bm25_score"],
+                                                                     frozen["bm25"]["min_bm25_terms"])
+
+
 def test_degraded_and_empty_notes_combined(kb, monkeypatch):
     monkeypatch.setattr(embedding, "get_embedding_model", embedding.create_embedding_model)
     result = _search(kb, PLAIN_USER, "QWERTYUIOP")

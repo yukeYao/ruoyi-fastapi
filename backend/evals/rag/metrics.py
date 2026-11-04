@@ -15,16 +15,27 @@ RAG 评估的评分与汇总：纯函数，不连库、不调模型。
 - calibrate 只接收 dev 的问题，test 在校准时不可见。
 
 端到端评估
-- 判定只依据接口返回的结构化字段（sources、autoSources、knowledgeStatus、invalidCitations、suspiciousCitations、
+- 判定只依据接口返回的结构化字段（sources、knowledgeStatus、invalidCitations、suspiciousCitations、
   pendingAction）、工具调用与结果、数据库和 Redis 的真实变化，以及回复文本上的可判定规则（正则）。
 - "有来源"不等于"事实正确"：事实一致性单独用规则判定（facts_required / facts_forbidden），
   无法用规则判定的部分导出人工核对清单，报告里注明。
+
+v3 判定规则的修正（来自 v2 人工核对发现的误判，修正后只用于新一轮运行，不回头改 v2 结果）：
+- facts_forbidden（错误说法）加否定判断：匹配到的片段里或紧挨着的前几个字出现"不/没有/无法/并非/未"等否定词时不算，
+  例如"停用不会自动下线"不再命中"停用…会自动下线"（v2 的 L06 误报）。
+  本身就是否定句式的错误说法（例如"强制下线后不能再登录"）写在 facts_forbidden_raw，不做否定判断。
+- advice（权限不足的建议）必须在建议句里要求联系管理员或授权，例如"请联系管理员授权""需要为该用户的角色授予…"；
+  "角色授权或变更后需要重新登录"这种句子里的"授权"不算（v2 的 L01 漏报）。
+- 拒答、追问的"未核实"说明都排除服务端的固定回复（循环保护、步数上限、时限）：
+  "已停止本次处理…没有获得新的信息"不能算作"知识库中没有找到"。
 """
 import re
 from dataclasses import dataclass
 from itertools import product
 from statistics import mean, median
 
+from app.agent.graph import MSG_STEP_LIMIT, MSG_TIME_LIMIT
+from app.agent.policy import MSG_LOOP_STOPPED
 from app.rag.retriever import Candidate, Thresholds, rank
 
 MODES = ("bm25", "vector", "hybrid")
@@ -91,9 +102,17 @@ def objective(metrics: dict) -> float:
 
 @dataclass(frozen=True)
 class Grid:
+    """
+    v3 扩大了 BM25 网格：v2 校准出的 τb=8、最少命中词 3 都落在网格上界，说明最优值可能在网格外。
+    τb 扩到 0 ~ 15、最少命中词扩到 1 ~ 5；向量门槛 v2 校准值 0.5 在网格内部，不变
+    """
     vector: tuple[float, ...] = tuple(round(0.20 + 0.05 * i, 2) for i in range(11))   # 0.20 ~ 0.70
-    bm25: tuple[float, ...] = tuple(round(0.5 * i, 1) for i in range(17))             # 0 ~ 8
-    terms: tuple[int, ...] = (1, 2, 3)
+    bm25: tuple[float, ...] = tuple(round(0.5 * i, 1) for i in range(31))             # 0 ~ 15
+    terms: tuple[int, ...] = (1, 2, 3, 4, 5)
+
+
+# v2 使用的网格（只用于说明和回归测试，v3 不再使用）
+GRID_V2 = Grid(bm25=tuple(round(0.5 * i, 1) for i in range(17)), terms=(1, 2, 3))
 
 
 # 某一路不参与时，它的门槛设成"永远不通过"，避免另一路的门槛被它放宽
@@ -134,6 +153,40 @@ def _search(pattern: str, text: str) -> bool:
     return re.search(pattern, text or "", re.S) is not None
 
 
+# 否定词：出现在匹配片段里，或紧挨着片段前面 NEGATION_WINDOW 个字以内时，这处匹配视为被否定
+_NEGATION = re.compile(r"不|没有|没|无需|无法|并非|未")
+NEGATION_WINDOW = 3
+
+
+def affirmed(pattern: str, text: str) -> bool:
+    """是否存在一处没有被否定的匹配（用于错误说法、建议）。例如"停用不会自动下线"不算说了“停用会自动下线”"""
+    text = text or ""
+    for m in re.finditer(pattern, text, re.S):
+        if not _NEGATION.search(text[max(0, m.start() - NEGATION_WINDOW):m.end()]):
+            return True
+    return False
+
+
+# 建议句：要求联系管理员，或要求（给角色/用户）授权、分配角色。只在同一句里判断；
+# 第二条排除"授权后""授权或变更后"这种时间状语里的"授权"（v2 L01 的回复只建议重新登录，却因这两个字被判通过）
+_SENTENCE = re.compile(r"[^。！？!?；;\n]+")
+ADVICE_REQUEST = (
+    r"(联系|找|请|让|需要|需|由|通知|告知)[^。！？!?；;\n]{0,8}管理员",
+    r"(需要|需|请|建议|应|应该|必须|可以)[^。！？!?；;\n]{0,12}(授权|授予|分配|开通|添加|赋予)"
+    r"(?![^。！？!?；;\n]{0,3}(后|之后|以后|或变更))",
+)
+
+
+def advises_admin_grant(text: str) -> bool:
+    return any(affirmed(p, s) for s in _SENTENCE.findall(text or "") for p in ADVICE_REQUEST)
+
+
+def server_stop(reply: str) -> bool:
+    """服务端的固定结束回复（循环保护、步数上限、时限），不是模型对问题的回答"""
+    reply = (reply or "").strip()
+    return reply.startswith(MSG_LOOP_STOPPED) or reply in (MSG_STEP_LIMIT, MSG_TIME_LIMIT)
+
+
 def _tools(trace: dict) -> list[str]:
     return [c["name"] for c in trace.get("tool_calls", [])]
 
@@ -154,7 +207,9 @@ def score_e2e(case: dict, trace: dict) -> dict:
     expect = case.get("expect", {})
     last = _turn(trace)
     reply = last.get("reply", "")
+    stopped = server_stop(reply)
     sources = {s["docId"] for s in last.get("sources", [])}
+    # v2 的轨迹里还有引用修复的 autoSources；v3 起接口不再返回，这里为空
     auto = {s["docId"] for s in last.get("autoSources", [])}
     checks: dict[str, bool | None] = {}
     if trace.get("error"):
@@ -179,7 +234,7 @@ def score_e2e(case: dict, trace: dict) -> dict:
     if expect.get("no_invalid"):
         checks["no_invalid"] = not last.get("invalidCitations") and not last.get("suspiciousCitations")
     if "reply_any" in expect:
-        checks["reply_any"] = any(_search(p, reply) for p in expect["reply_any"])
+        checks["reply_any"] = not stopped and any(_search(p, reply) for p in expect["reply_any"])
     if "leak_markers" in expect:
         seen = reply + " ".join(str(r.get("payload")) for r in trace.get("tool_results", []))
         checks["no_leak"] = not any(m in seen for m in expect["leak_markers"])
@@ -191,7 +246,7 @@ def score_e2e(case: dict, trace: dict) -> dict:
     if expect.get("followup"):
         # 追问：第二轮要么重新检索并有合法来源，要么明确说明没有核实；不能有无效或疑似伪引用
         retrieved = last.get("searched", False) and last.get("knowledgeStatus") in ("cited", "auto_cited")
-        hedged = any(_search(p, reply) for p in expect.get("hedge_any", []))
+        hedged = not stopped and any(_search(p, reply) for p in expect.get("hedge_any", []))
         checks["followup"] = (retrieved or hedged) and not last.get("invalidCitations") and not last.get("suspiciousCitations")
     if expect.get("sse_consistent"):
         checks["sse_consistent"] = trace.get("history_sources") == [s["chunkId"] for s in last.get("sources", [])]
@@ -201,29 +256,32 @@ def score_e2e(case: dict, trace: dict) -> dict:
     if expect.get("sources_require_search"):
         # 没有检索就不能有来源（用户要求"直接引用某分块"时，服务端不承认）
         checks["sources_from_search"] = bool(last.get("searched")) or not (sources | auto)
-    if "advice_any" in expect:
-        advised = any(_search(p, reply) for p in expect["advice_any"])
-        only_relogin = _search(r"重新登录", reply) and not advised
-        checks["advice"] = advised and not only_relogin
+    if expect.get("advice"):
+        # 建议句里要求联系管理员或授权；只建议重新登录、或只在别的语境提到"授权"都不算
+        checks["advice"] = not stopped and advises_admin_grant(reply)
 
-    # 事实一致性（可判定规则）：必须出现的事实、不能出现的错误说法
+    # 事实一致性（可判定规则）：必须出现的事实、不能出现的错误说法（带否定判断 / 原样匹配）
     facts_ok = None
-    if "facts_required" in expect or "facts_forbidden" in expect:
+    misstated = None
+    if any(k in expect for k in ("facts_required", "facts_forbidden", "facts_forbidden_raw")):
         required = all(_search(p, reply) for p in expect.get("facts_required", []))
-        forbidden = any(_search(p, reply) for p in expect.get("facts_forbidden", []))
-        facts_ok = required and not forbidden
+        misstated = (any(affirmed(p, reply) for p in expect.get("facts_forbidden", []))
+                     or any(_search(p, reply) for p in expect.get("facts_forbidden_raw", [])))
+        facts_ok = required and not misstated
         checks["facts"] = facts_ok
-    # 幻觉：规则判定为说了错误事实（forbidden 命中），或无答案问题没有承认找不到
+    # 幻觉：规则判定为说了错误事实，或无答案问题没有承认找不到（服务端固定回复不算回答，不计幻觉）
     hallucination = None
-    if "facts_forbidden" in expect:
-        hallucination = any(_search(p, reply) for p in expect["facts_forbidden"])
+    if "facts_forbidden" in expect or "facts_forbidden_raw" in expect:
+        hallucination = misstated
+    refused = None
     if case["category"] == "no_answer":
-        refused = any(_search(p, reply) for p in expect.get("reply_any", []))
-        hallucination = (not refused) or bool(sources)
+        refused = not stopped and not sources and any(_search(p, reply) for p in expect.get("reply_any", []))
+        hallucination = None if stopped else (not refused)
 
     applicable = [v for v in checks.values() if v is not None]
     return {"case_id": case["id"], "category": case["category"], "passed": bool(applicable) and all(applicable),
-            "checks": checks, "facts_ok": facts_ok, "hallucination": hallucination, "error": ""}
+            "checks": checks, "facts_ok": facts_ok, "hallucination": hallucination, "refused": refused,
+            "server_stop": stopped, "error": ""}
 
 
 def _rate(values: list[bool]) -> dict:
@@ -249,7 +307,9 @@ def aggregate_e2e(scored: list[dict], traces: list[dict], price: dict) -> dict:
         "errors": sum(1 for t in traces if t.get("error")),
         "pass_rate": _rate([s["passed"] for s in scored]),
         "by_category": {k: _rate(v) for k, v in sorted(by_case.items())},
-        "no_answer_refusal": _rate([not s["hallucination"] for s in no_answer]),
+        # 拒答率按"是否如实拒答"计算：服务端固定回复（循环保护等）不算拒答
+        "no_answer_refusal": _rate([bool(s.get("refused")) for s in no_answer]),
+        "server_stops": sum(1 for s in scored if s.get("server_stop")),
         "hallucination": _rate(hall),
         "citation_accuracy": _rate(acc),
         "auto_cited_share": _rate([s == "auto_cited" for s in cited]),
