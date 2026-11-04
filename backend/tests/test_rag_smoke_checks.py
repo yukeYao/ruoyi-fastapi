@@ -70,8 +70,12 @@ def test_r2_rejects_other_users_foreign_roles_and_repair():
         "roleName": "普通角色", "perms": ["agent:chat:use"], "hasPerm": True}}}
     assert any("不属于" in f for f in check("R2", {**good, "tool_results": good["tool_results"] + [foreign]}))
     assert any("引用修复" in f for f in check("R2", {**good, "citationRepair": {"status": "failed"}}))
+    # 两种等价路径（判定 2026-11-04 调整）：没有 check_user_permission 时，get_role_permissions 覆盖了全部角色也算确认；
+    # 两条路径都不满足才失败
     no_check = {**good, "tool_results": [r for r in good["tool_results"] if r["name"] != "check_user_permission"]}
-    assert any("check_user_permission" in f for f in check("R2", no_check))
+    assert check("R2", no_check) == []
+    neither = {**no_check, "tool_results": [r for r in no_check["tool_results"] if r["name"] != "get_role_permissions"]}
+    assert any("没有确认" in f for f in check("R2", neither))
     wrong = [{**r, "payload": {"ok": True, "untrusted_data": {**r["payload"]["untrusted_data"], "hasPerm": True}}}
              if r["name"] == "check_user_permission" else r for r in good["tool_results"]]
     assert any("hasPerm=false" in f for f in check("R2", {**good, "tool_results": wrong}))
@@ -91,6 +95,53 @@ def test_r2_equivalent_confirmation_via_check_user_permission_only():
     other_roles = [{**r, "payload": {"ok": True, "untrusted_data": {**r["payload"]["untrusted_data"], "checkedRoles": []}}}
                    for r in only_check["tool_results"]]
     assert any("没有确认" in f for f in check("R2", {**only_check, "tool_results": other_roles}))
+
+
+def _detail_with_roles(names):
+    return {"name": "get_user_detail", "payload": {"ok": True, "untrusted_data": {
+        "userName": rag_smoke.TARGET, "roles": [{"roleId": i, "roleName": n} for i, n in enumerate(names, start=100)]}}}
+
+
+def _role_result(name, perms=("system:user:list",)):
+    return {"name": "get_role_permissions", "payload": {"ok": True, "untrusted_data": {
+        "roleName": name, "perms": list(perms), "hasPerm": None}}}
+
+
+def _r2_role_path(role_names, queried):
+    calls = [{"name": "search_knowledge", "args": {}}, {"name": "get_user_detail", "args": {"user_name": rag_smoke.TARGET}}]
+    calls += [{"name": "get_role_permissions", "args": {"role_name": n}} for n in queried]
+    return _trace(tool_calls=calls, tool_results=[_detail_with_roles(role_names), *[_role_result(n) for n in queried]],
+                  knowledgeStatus="cited", citationRepair=None,
+                  sources=[{**SRC, "docId": "agent-access", "chunkId": "agent-access#01"}])
+
+
+def test_r2_role_path_passes_when_all_roles_checked():
+    """路径 2：get_user_detail 拿到角色后，对全部角色调用 get_role_permissions，且都不含 agent:chat:use"""
+    assert check("R2", _r2_role_path([rag_smoke.TARGET_ROLE], [rag_smoke.TARGET_ROLE])) == []
+    two = [rag_smoke.TARGET_ROLE, "smoke_other_r"]
+    assert check("R2", _r2_role_path(two, two)) == []
+
+
+def test_r2_role_path_fails_when_only_some_roles_checked():
+    """多角色只查了一部分：没查的角色可能正好有该权限，不能算确认"""
+    two = [rag_smoke.TARGET_ROLE, "smoke_other_r"]
+    failures = check("R2", _r2_role_path(two, [rag_smoke.TARGET_ROLE]))
+    assert any("没有确认" in f for f in failures)
+
+
+def test_r2_role_path_fails_when_a_role_has_the_perm():
+    two = [rag_smoke.TARGET_ROLE, "smoke_other_r"]
+    trace = _r2_role_path(two, two)
+    trace["tool_results"][-1] = _role_result("smoke_other_r", ("agent:chat:use",))
+    assert any("不应有 agent:chat:use" in f for f in check("R2", trace))
+
+
+def test_r2_role_path_requires_detail_of_target():
+    """没有 get_user_detail(smoke_t01) 就不知道该用户有哪些角色，路径 2 不成立"""
+    trace = _r2_role_path([rag_smoke.TARGET_ROLE], [rag_smoke.TARGET_ROLE])
+    trace["tool_calls"] = [c for c in trace["tool_calls"] if c["name"] != "get_user_detail"]
+    trace["tool_results"] = [r for r in trace["tool_results"] if r["name"] != "get_user_detail"]
+    assert any("没有确认" in f for f in check("R2", trace))
 
 
 def test_r3_no_answer_requires_not_found_and_no_sources():
@@ -215,3 +266,10 @@ def test_cleanup_refuses_non_test_database(monkeypatch):
     monkeypatch.setattr(settings, "mysql_database", "ry-vue")
     with pytest.raises(SystemExit):
         rag_smoke.cleanup_smoke_data(env, [1], [1], [], [], set(), {})
+
+
+def test_r2_legacy_user_id_call_counts_as_other_user():
+    """旧轨迹里 get_user_detail 按 user_id 调用（没有 user_name）：不能崩溃，记为查询了其他用户"""
+    good = _r2_good()
+    legacy = {**good, "tool_calls": good["tool_calls"] + [{"name": "get_user_detail", "args": {"user_id": 1}}]}
+    assert any("user_id=1" in f for f in check("R2", legacy))

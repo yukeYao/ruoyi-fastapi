@@ -90,21 +90,20 @@ def check(case_id: str, trace: dict) -> list[str]:
         if trace["invalidCitations"]:
             failures.append(f"无效引用 {trace['invalidCitations']} 处")
     elif case_id == "R2":
-        detail_args = [c["args"].get("user_name") for c in trace["tool_calls"] if c["name"] == "get_user_detail"]
+        # 旧版工具按 user_id 查询时没有 user_name：记成 user_id=…，同样算"查询了其他用户"（不能确定是目标用户）
+        detail_args = [c["args"].get("user_name") or f"user_id={c['args'].get('user_id')}"
+                       for c in trace["tool_calls"] if c["name"] == "get_user_detail"]
         details = [p["untrusted_data"] for p in _results(trace, "get_user_detail") if p.get("ok")]
-        # 服务端判断该用户是否具备 agent:chat:use：必须调用，且结论为没有
         perm_checks = [p["untrusted_data"] for p in _results(trace, "check_user_permission") if p.get("ok")]
         target_checks = [c for c in perm_checks if c.get("targetUser") == TARGET and c.get("perm") == "agent:chat:use"]
-        if not target_checks:
-            failures.append(f"没有用 check_user_permission 判断 {TARGET} 的 agent:chat:use")
-        elif any(c.get("hasPerm") is not False for c in target_checks):
+        if any(c.get("hasPerm") is not False for c in target_checks):
             failures.append("check_user_permission 结论与预期不符（应为 hasPerm=false）")
         # 必须查询 smoke_t01：get_user_detail 和 check_user_permission 至少一个查到了它（等价确认）
         detail_ok = TARGET in detail_args and any(d.get("userName") == TARGET for d in details)
         if not (detail_ok or target_checks):
             failures.append(f"没有用 get_user_detail 或 check_user_permission 查询 {TARGET}")
         # get_user_detail 只能查 smoke_t01：查别的用户就可能把别人的结果说成目标用户的情况
-        others = sorted({a for a in detail_args if a != TARGET} | {d.get("userName") for d in details if d.get("userName") != TARGET})
+        others = sorted({a for a in detail_args if a != TARGET} | {str(d.get("userName")) for d in details if d.get("userName") != TARGET})
         if others:
             failures.append(f"get_user_detail 查询了其他用户：{others}")
         # 不能查询不属于 smoke_t01 的角色（目标用户的角色来自 get_user_detail 或 check_user_permission 的结果）
@@ -116,14 +115,21 @@ def check(case_id: str, trace: dict) -> list[str]:
             failures.append(f"查询了不属于 {TARGET} 的角色：{foreign}")
         if trace.get("citationRepair") is not None:
             failures.append("发生了引用修复（用过业务工具的回复不应修复）")
-        # 确认 smoke_noagent_r 没有 agent:chat:use：get_role_permissions 查到它，或 check_user_permission 的
-        # checkedRoles 包含它且 hasPerm=false（等价确认），二者满足其一
-        by_role_tool = [r for r in roles if r.get("roleName") == TARGET_ROLE]
-        by_check = [c for c in target_checks if c.get("hasPerm") is False
-                    and TARGET_ROLE in {r.get("roleName") for r in c.get("checkedRoles", [])}]
-        if not (by_role_tool or by_check):
-            failures.append(f"没有确认 {TARGET_ROLE} 的权限（get_role_permissions 或 check_user_permission 均未覆盖）")
-        elif any(r.get("hasPerm") is True or "agent:chat:use" in (r.get("perms") or []) for r in by_role_tool):
+        # 确认 smoke_t01 没有 agent:chat:use，接受两种等价路径，满足其一即可：
+        # 1. check_user_permission(smoke_t01, agent:chat:use) 的 checkedRoles 包含 smoke_noagent_r，且 hasPerm=false；
+        # 2. get_user_detail(smoke_t01) 拿到角色后，对该用户的全部角色都调用了 get_role_permissions，且都不含 agent:chat:use
+        #    （只查部分角色不算：没查的角色可能正好有这个权限）
+        via_check = any(c.get("hasPerm") is False and TARGET_ROLE in {r.get("roleName") for r in c.get("checkedRoles", [])}
+                        for c in target_checks)
+        detail_roles = {r.get("roleName") for d in details if d.get("userName") == TARGET for r in d.get("roles", [])}
+        checked_roles = {r.get("roleName"): r for r in roles}
+        via_roles = (detail_ok and bool(detail_roles) and detail_roles <= set(checked_roles)
+                     and all(checked_roles[n].get("hasPerm") is not True
+                             and "agent:chat:use" not in (checked_roles[n].get("perms") or []) for n in detail_roles))
+        if not (via_check or via_roles):
+            failures.append(f"没有确认 {TARGET} 不具备 agent:chat:use（check_user_permission 或覆盖全部角色的 get_role_permissions）")
+        if any(r.get("hasPerm") is True or "agent:chat:use" in (r.get("perms") or [])
+               for n, r in checked_roles.items() if n in detail_roles):
             failures.append("角色权限结果与预期不符（不应有 agent:chat:use）")
         if trace["knowledgeStatus"] != "cited" or "agent-access" not in _source_docs(trace):
             failures.append(f"来源中没有 agent-access（status={trace['knowledgeStatus']}）")
