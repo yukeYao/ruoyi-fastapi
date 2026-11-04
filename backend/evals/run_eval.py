@@ -25,6 +25,8 @@ def _set_test_environment(out_dir: Path) -> None:
     os.environ["MYSQL_DATABASE"] = "ry-vue-test"
     os.environ["REDIS_DB"] = "1"
     os.environ["AGENT_CHECKPOINT_PATH"] = str(out_dir / "checkpoints.sqlite")
+    # 知识库索引也放进本次运行目录：评估建索引、清理旧构建时绝不能碰开发环境的 data/knowledge_index
+    os.environ["KNOWLEDGE_INDEX_PATH"] = str(out_dir / "knowledge_index")
 
 
 def _git_commit() -> str:

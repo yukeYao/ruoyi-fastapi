@@ -107,6 +107,11 @@ def get_role_detail(db: Session, role_id: int) -> dict:
     return model_to_camel_dict(role)
 
 
+def get_role_by_name(db: Session, role_name: str) -> SysRole | None:
+    """按角色名称精确查找未删除的角色（角色名称唯一，见 check_role_name_unique）。调用方负责数据范围校验"""
+    return db.query(SysRole).filter(SysRole.role_name == role_name, SysRole.del_flag == DEL_FLAG_NORMAL).first()
+
+
 def list_all_roles(db: Session, login_user: dict) -> list[dict]:
     """对应 selectRoleAll：不分页的角色列表，Java 里经 AOP 代理调用 selectRoleList，同样受数据权限过滤"""
     query, r = _role_query(db, login_user)

@@ -39,7 +39,7 @@
           </template>
 
           <el-scrollbar ref="scrollRef" height="calc(100vh - 360px)" class="message-area">
-            <el-empty v-if="!items.length" description="可以查询用户、角色、部门、登录日志、操作日志和在线会话；停用账号、解锁、强制下线需要你审批后才会执行" :image-size="80" />
+            <el-empty v-if="!items.length" description="可以询问系统规则和权限配置，查询用户、角色、部门、登录日志、操作日志和在线会话；停用账号、解锁、强制下线需要你审批后才会执行" :image-size="80" />
 
             <div v-for="item in items" :key="item.key" class="message-row" :class="'row-' + item.kind">
               <!-- 用户消息 -->
@@ -48,6 +48,23 @@
               <!-- 模型回复：纯文本，不渲染 Markdown/HTML/链接 -->
               <div v-else-if="item.kind === 'assistant'" class="bubble bubble-assistant">
                 <span>{{ item.text }}</span><span v-if="item.streaming" class="cursor">▍</span>
+              </div>
+
+              <!-- 知识库来源：只显示服务端校验过的 sources（本轮检索实际返回的分块），不解析回复里的引用 -->
+              <div v-else-if="item.kind === 'sources'" class="sources">
+                <template v-if="item.knowledge.sources && item.knowledge.sources.length">
+                  <div class="sources-title">来源（知识库）</div>
+                  <div v-for="s in item.knowledge.sources" :key="s.chunkId" class="source-item">
+                    <span>{{ s.title }}</span><span v-if="s.section" class="source-section"> · {{ s.section }}</span>
+                    <span class="source-id">[{{ s.chunkId }}]</span>
+                  </div>
+                </template>
+                <el-tag v-else-if="KNOWLEDGE_STATUS[item.knowledge.status]" size="small" :type="KNOWLEDGE_STATUS[item.knowledge.status].type">
+                  {{ KNOWLEDGE_STATUS[item.knowledge.status].label }}
+                </el-tag>
+                <div v-if="item.knowledge.invalidCitations" class="source-warning">
+                  回复中有 {{ item.knowledge.invalidCitations }} 处引用不是本轮知识库检索返回的内容，无法核实，未列入来源
+                </div>
               </div>
 
               <!-- 工具调用 -->
@@ -211,6 +228,19 @@ function pushError(text, type) {
 // 审批运行出错时服务端附带的 action：已到终态说明写操作已经处理完，只是模型回复失败
 const SETTLED = ['SUCCEEDED', 'FAILED', 'REJECTED', 'EXPIRED', 'EXECUTING']
 
+// 知识库状态由服务端按本轮检索结果计算（knowledge.status），不从模型回复里判断
+const KNOWLEDGE_STATUS = {
+  not_found: { label: '知识库中未找到依据', type: 'warning' },
+  uncited: { label: '回答未引用知识库来源', type: 'info' },
+  unavailable: { label: '知识库暂不可用，回答未使用知识库', type: 'warning' }
+}
+
+function pushKnowledge(knowledge) {
+  if (knowledge && knowledge.status) {
+    push({ kind: 'sources', knowledge: knowledge })
+  }
+}
+
 // 审批结果的可信字段（status）由服务端生成，可以作为步骤状态显示
 const OUTCOME_TEXT = {
   SUCCEEDED: '已执行成功',
@@ -249,6 +279,7 @@ function appendMessages(messages) {
     } else if (m.type === 'ai') {
       if (m.content) {
         push({ kind: 'assistant', text: m.content })
+        pushKnowledge(m.knowledge)
       }
       for (const c of m.toolCalls || []) {
         push({ kind: 'tool_call', name: c.name, args: JSON.stringify(c.args) })
@@ -354,6 +385,8 @@ function createStreamHandler() {
         current.streaming = false
         current = null
       }
+      // 流式过程中的消息不带引用信息；最终回复的来源以 final 里服务端生成的为准
+      pushKnowledge(data.knowledgeStatus ? { status: data.knowledgeStatus, sources: data.sources, invalidCitations: data.invalidCitations } : null)
       applyResult(data)
     } else if (event === 'error') {
       if (current) {
@@ -532,6 +565,25 @@ onMounted(() => {
     font-size: 12px;
     white-space: pre-wrap;
     word-break: break-all;
+  }
+  .sources {
+    max-width: 80%;
+    font-size: 12px;
+    color: var(--el-text-color-secondary);
+    .sources-title {
+      margin-bottom: 2px;
+    }
+    .source-item {
+      word-break: break-all;
+    }
+    .source-id {
+      margin-left: 4px;
+      color: var(--el-text-color-placeholder);
+    }
+    .source-warning {
+      margin-top: 4px;
+      color: var(--el-color-warning);
+    }
   }
   .approval-card {
     width: 100%;
