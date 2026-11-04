@@ -24,7 +24,7 @@ class AgentContext:
     # 操作者自己的会话 tokenId：只用于"强制下线"时排除操作者自己的会话，不传给工具的 login_user
     session_token: str | None = None
     client_ip: str = ""
-    # time.monotonic() 的截止时间：每次调用模型前检查，保证运行在运行锁过期之前结束
+    # time.monotonic() 的软截止时间：每次调用模型前检查，降低运行超过运行锁时长的可能（不是硬上限）
     deadline: float = 0.0
 
 

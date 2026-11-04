@@ -450,7 +450,8 @@ def test_run_lock_blocks_concurrent_approve(scripted_model):
 
 
 def test_lock_ttl_covers_run_deadline():
-    # 运行时限内最后一次模型调用最晚在 deadline 前开始、最多再持续一个超时；锁必须比这更久
+    # 配置上的必要条件：最后一次模型调用最晚在 deadline 前一个超时开始，锁至少要比这更久。
+    # 这只是必要条件，不是"运行一定在锁过期前结束"的保证（超时不是总时长，工具耗时也不受时限约束）
     assert AGENT_RUN_LOCK_SECONDS > AGENT_RUN_DEADLINE_SECONDS + AGENT_MODEL_TIMEOUT_SECONDS
 
 

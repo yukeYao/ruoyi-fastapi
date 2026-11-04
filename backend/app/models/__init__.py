@@ -3,6 +3,9 @@
 """
 from app.models.agent_action import AgentAction
 from app.models.agent_conversation import AgentConversation
+from app.models.agent_knowledge_chunk import AgentKnowledgeChunk
+from app.models.agent_knowledge_doc import AgentKnowledgeDoc
+from app.models.agent_knowledge_index import AgentKnowledgeIndex
 from app.models.sys_config import SysConfig
 from app.models.sys_dept import SysDept
 from app.models.sys_dict_data import SysDictData
@@ -21,6 +24,9 @@ from app.models.sys_user_role import SysUserRole
 __all__ = [
     "AgentAction",
     "AgentConversation",
+    "AgentKnowledgeChunk",
+    "AgentKnowledgeDoc",
+    "AgentKnowledgeIndex",
     "SysConfig",
     "SysDept",
     "SysDictData",

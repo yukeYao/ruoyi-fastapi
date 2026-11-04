@@ -33,7 +33,7 @@ class ModelCallError(RuntimeError):
     """
     模型调用失败的脱敏异常。第三方 SDK 的异常信息可能带有部分 Key、请求头、上游返回的原文，
     而 LangGraph 会把节点异常的 repr 写进 checkpoint，logger.exception 也会打印异常链，
-    所以只保留异常类型和 HTTP 状态码，并用 from None 切断原异常链。
+    所以只保留异常类型和 HTTP 状态码，并在 except 块之外抛出，不挂原异常（__cause__、__context__ 都为空）。
     """
 
 
@@ -50,7 +50,7 @@ def agent_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
         # 不再调用模型，直接给出固定回复结束本轮，防止"查询 -> 再查询"无限循环
         return {"messages": [AIMessage(content=MSG_STEP_LIMIT)]}
     if ctx.deadline and time.monotonic() + AGENT_MODEL_TIMEOUT_SECONDS > ctx.deadline:
-        # 剩余时间不够一次模型调用：停止，保证整次运行在运行锁过期前结束
+        # 剩余时间不够一个模型超时：不再调用模型，尽量让运行在运行锁过期前结束（软时限，见 constants）
         return {"messages": [AIMessage(content=MSG_TIME_LIMIT)]}
 
     schemas = policy.bindable_tool_schemas(ctx.login_user)
@@ -60,10 +60,14 @@ def agent_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
     boundary = policy.capability_boundary(ctx.login_user)
     system = policy.SYSTEM_PROMPT + ("\n\n" + boundary if boundary else "")
     prompt = [SystemMessage(content=system), *policy.trim_history(state["messages"])]
+    error = ""
     try:
         response = model.invoke(prompt)
     except Exception as exc:
-        raise ModelCallError(_describe_model_error(exc)) from None
+        error = _describe_model_error(exc)
+    # 在 except 块外抛出：from None 只是不显示原异常，__context__ 里仍会挂着 SDK 异常（可能带 Key）
+    if error:
+        raise ModelCallError(error)
     return {"messages": [response], "step_count": step_count + 1}
 
 

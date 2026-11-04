@@ -254,3 +254,32 @@ def test_system_prompt_not_persisted(scripted_model):
     types = [m["type"] for m in client.get(f"/agent/conversation/{conv_id}/messages", headers=admin).json()["data"]]
     assert "system" not in types
     assert policy.SYSTEM_PROMPT  # 提示词每次拼接，不进 state
+
+
+def test_model_error_keeps_no_exception_context():
+    """
+    回归：ModelCallError 用 raise ... from None 只是不显示原异常，__context__ 里仍保留 SDK 异常
+    （信息里可能带 Key、请求原文）。必须在 except 块外抛出，原异常对象不能挂在脱敏异常上
+    """
+    from types import SimpleNamespace
+
+    import pytest
+
+    from langchain_core.messages import HumanMessage
+
+    from app.agent import graph
+    from app.agent.context import build_context
+
+    class LeakyModel:
+        def bind_tools(self, schemas):
+            return self
+
+        def invoke(self, prompt):
+            raise RuntimeError("401 invalid key sk-MODEL-CANARY-999")
+
+    ctx = build_context({"user_id": 1, "user_name": "admin", "permissions": ["*:*:*"]}, LeakyModel())
+    state = {"messages": [HumanMessage(content="hi")], "conversation_id": "c", "step_count": 0}
+    with pytest.raises(graph.ModelCallError) as exc:
+        graph.agent_node(state, SimpleNamespace(context=ctx))
+    assert "CANARY" not in str(exc.value)
+    assert exc.value.__cause__ is None and exc.value.__context__ is None

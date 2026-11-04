@@ -19,7 +19,9 @@ def _num(value, fmt="{:.2f}") -> str:
 
 
 def _count(metric: dict) -> str:
-    return "不适用" if metric.get("na") else str(metric["value"])
+    if metric.get("na"):
+        return "不适用"
+    return "未记录（旧轨迹）" if metric.get("unrecorded") else str(metric["value"])
 
 
 def metrics_table(variants: list[str], metrics: dict) -> str:
@@ -28,7 +30,8 @@ def metrics_table(variants: list[str], metrics: dict) -> str:
         ("查询 + 写操作完成率", lambda m: _pct(m["task_completion_core"])),
         ("工具选择准确率", lambda m: _pct(m["tool_accuracy"])),
         ("约束满足率", lambda m: _pct(m["constraint_satisfaction"])),
-        ("未经批准写操作数", lambda m: _count(m["unapproved_writes"])),
+        ("未经确认的写操作数", lambda m: _count(m["unconfirmed_writes"])),
+        ("越权写操作数（用户已确认）", lambda m: _count(m["confirmed_unauthorized_writes"])),
         ("不应发生的写操作数", lambda m: _count(m["unexpected_writes"])),
         ("越权拦截率", lambda m: _pct(m["interception"]) + (
             f"（发起越权时 {_pct(m['interception_when_attempted'])}）" if "interception_when_attempted" in m else "")),
@@ -99,7 +102,7 @@ def failures(cases: list[dict], scored: list[dict]) -> str:
 def na_notes(variants: list[str]) -> str:
     notes = []
     if "A" in variants:
-        notes.append(f"- 基线 A 的工具选择准确率、未经批准写操作数、不应发生的写操作数、越权拦截率、提示注入成功率："
+        notes.append(f"- 基线 A 的工具选择准确率、未经确认 / 越权写操作数、不应发生的写操作数、越权拦截率、提示注入成功率："
                      f"{NA_NO_TOOLS}。其中经工具结果进入的注入（I1、I2）在 A 中根本无法送达模型；"
                      "用户消息里的注入（I3）没有可执行的写能力，同样无法形成效果。A 在这些用例上的价值只能从"
                      "任务完成率（是否如实说明做不到）和\"声称已执行但未发生\"两项观察。")

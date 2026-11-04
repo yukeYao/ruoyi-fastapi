@@ -42,6 +42,15 @@ class Settings(BaseSettings):
     # LangGraph checkpoint 的 SQLite 文件，相对路径按 backend/ 解析；backend/data/ 已加入 .gitignore
     agent_checkpoint_path: str = "data/agent_checkpoints.sqlite"
 
+    # 知识库 Embedding：同样走 OpenAI 兼容协议，Key 只放 .env。未配置时知识库检索不可用（安全失败），
+    # 构建索引脚本必须显式指定 --fake 才会用假 Embedding（只用于开发和测试）
+    agent_embedding_model: str = ""
+    agent_embedding_api_key: str = ""
+    agent_embedding_base_url: str = ""
+    # 本地 faiss 索引目录，相对路径按 backend/ 解析；backend/data/ 已加入 .gitignore。
+    # pytest 在 conftest 里改成临时目录，绝不读写开发索引
+    knowledge_index_path: str = "data/knowledge_index"
+
     @property
     def sqlalchemy_database_uri(self) -> str:
         # ry-vue 数据库名含短横线，PyMySQL 连接字符串直接拼接即可，无需额外转义
@@ -54,6 +63,11 @@ class Settings(BaseSettings):
     @property
     def agent_checkpoint_file(self) -> Path:
         path = Path(self.agent_checkpoint_path)
+        return path if path.is_absolute() else BACKEND_DIR / path
+
+    @property
+    def knowledge_index_dir(self) -> Path:
+        path = Path(self.knowledge_index_path)
         return path if path.is_absolute() else BACKEND_DIR / path
 
 
