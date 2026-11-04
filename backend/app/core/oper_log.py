@@ -11,8 +11,9 @@
 """
 import functools
 import json
+import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from datetime import datetime
 from typing import Any
 
@@ -25,6 +26,39 @@ from app.core.request_utils import get_client_ip, get_login_location
 from app.models.sys_oper_log import SysOperLog
 
 _executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="oper-log")
+# 尚未写完的异步日志任务：只做登记，写库行为不变；供测试用 flush_oper_log_for_test 确定性地等待落库
+_pending: set[Future] = set()
+_pending_lock = threading.Lock()
+
+
+def _submit(*args) -> None:
+    future = _executor.submit(_write_log, *args)
+    with _pending_lock:
+        _pending.add(future)
+    future.add_done_callback(_discard)
+
+
+def _discard(future: Future) -> None:
+    with _pending_lock:
+        _pending.discard(future)
+
+
+def flush_oper_log_for_test(timeout: float = 10.0) -> None:
+    """
+    只供测试使用：等待当前已提交的异步操作日志全部写完（包括等待期间新提交的）。
+    替代测试里的"轮询若干秒等日志出现"：轮询在机器忙时会超时，也挡不住"上一个请求的日志晚到"这类竞态。
+    生产代码不调用它，日志仍然异步写、不阻塞接口
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        with _pending_lock:
+            futures = list(_pending)
+        if not futures:
+            return
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("等待异步操作日志写入超时")
+        wait(futures, timeout=remaining)
 
 # 排除敏感属性字段，对应 LogAspect.EXCLUDE_PROPERTIES
 _SENSITIVE_KEYS = {"password", "oldPassword", "newPassword", "confirmPassword"}
@@ -120,7 +154,7 @@ def record_oper_log(
     args = (title, business_type, method, request_method, url, oper_name, dept_name, ip, oper_param, json_result,
             status, error_msg, cost_time)
     if background:
-        _executor.submit(_write_log, *args)
+        _submit(*args)
     else:
         _write_log(*args)
 

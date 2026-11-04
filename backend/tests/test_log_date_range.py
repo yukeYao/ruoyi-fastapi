@@ -4,10 +4,11 @@
 复现的问题：前端日期选择器传的是 `D 00:00:00 ~ D 23:59:59`，
 后端曾经把结束时间截成 `D`，MySQL 按 `D 00:00:00` 比较，导致结束日期当天的记录全部查不到。
 """
-import time
 from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
+
+from app.core.oper_log import flush_oper_log_for_test
 
 from main import app
 from tests.conftest import auth_headers
@@ -44,14 +45,12 @@ def _has_day(rows: list[dict], day: str) -> bool:
     return any(r["loginTime"].startswith(day) for r in rows)
 
 
-def _wait_for_oper_log(headers, title: str, timeout: float = 3.0) -> dict:
-    """@log 是异步写库，轮询等它落库"""
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        body = client.get("/monitor/operlog/list", headers=headers, params={"title": title, "pageSize": 1}).json()
-        if body["total"] > 0:
-            return body["rows"][0]
-        time.sleep(0.1)
+def _wait_for_oper_log(headers, title: str) -> dict:
+    """@log 是异步写库：先等已提交的日志全部写完，再查询"""
+    flush_oper_log_for_test()
+    body = client.get("/monitor/operlog/list", headers=headers, params={"title": title, "pageSize": 1}).json()
+    if body["total"] > 0:
+        return body["rows"][0]
     raise AssertionError(f"等待操作日志 '{title}' 落库超时")
 
 

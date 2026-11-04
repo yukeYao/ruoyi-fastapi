@@ -222,42 +222,120 @@ def test_rule_question_retrieves_password_lock_in_bm25_mode(smoke_kb):
     assert hits[0].doc_id == "password-lock"
 
 
-def test_cleanup_physically_deletes_smoke_data_and_redis_keys():
-    """cleanup_smoke_data：smoke_ 用户、角色及关联物理删除，本次登录态和频率限制计数删除（只在测试库上）"""
+def _cleanup_env():
     from fastapi.testclient import TestClient
 
-    from app.core.constants import AGENT_RATE_LIMIT_KEY_PREFIX, LOGIN_TOKEN_KEY_PREFIX, LOGIN_USER_KEY
-    from app.core.redis_client import redis_client
-    from app.core.security import decode_jwt_token
     from evals import environment as env
     from main import app
-    from tests.agent_helpers import MENU_USER, add_role, add_user
     from tests.conftest import auth_headers
 
     client = TestClient(app)
-    admin = auth_headers(client)
-    marks = {"oper": env.sql("SELECT COALESCE(MAX(oper_id), 0) FROM sys_oper_log")[0][0],
-             "login": env.sql("SELECT COALESCE(MAX(info_id), 0) FROM sys_logininfor")[0][0]}
-    role_id = add_role(client, admin, "smoke_cleanup_r", [MENU_USER])
-    user_id = add_user(client, admin, "smoke_cleanup_u", [role_id])
-    # 交给 cleanup_smoke_data 物理删除，不再走 agent_helpers 的逻辑删除
+    return env, client, auth_headers(client)
+
+
+def _make_smoke_user(client, admin, user_name, role_key):
+    """建 smoke_ 用户和角色，交给 cleanup_smoke_data 物理删除（不再走 agent_helpers 的逻辑删除）"""
     from tests import agent_helpers
+    from tests.agent_helpers import MENU_USER, add_role, add_user
+
+    role_id = add_role(client, admin, role_key, [MENU_USER])
+    user_id = add_user(client, admin, user_name, [role_id])
     agent_helpers.CREATED_USER_IDS.remove(user_id)
     agent_helpers.CREATED_ROLE_IDS.remove(role_id)
+    return user_id, role_id
+
+
+def test_cleanup_physically_deletes_smoke_data_and_redis_keys():
+    """cleanup_smoke_data：smoke_ 用户、角色及关联物理删除，smoke_ 的日志、本次记录的会话、知识库行、登录态和计数删除"""
+    from app.core.constants import AGENT_RATE_LIMIT_KEY_PREFIX, LOGIN_TOKEN_KEY_PREFIX, LOGIN_USER_KEY
+    from app.core.oper_log import flush_oper_log_for_test
+    from app.core.redis_client import redis_client
+    from app.core.security import decode_jwt_token
+    from tests import agent_helpers
+
+    env, client, admin = _cleanup_env()
+    user_id, role_id = _make_smoke_user(client, admin, "smoke_cleanup_u", "smoke_cleanup_r")
     headers = env.login("smoke_cleanup_u", agent_helpers.PASSWORD)
     token_key = LOGIN_TOKEN_KEY_PREFIX + decode_jwt_token(headers["Authorization"].split(" ", 1)[1])[LOGIN_USER_KEY]
     redis_client.set(AGENT_RATE_LIMIT_KEY_PREFIX + str(user_id), 3)
+    env.sql("INSERT INTO agent_conversation (conversation_id, user_id, title) VALUES ('smoke-conv-1', :u, 't')", u=user_id)
+    env.sql("INSERT INTO agent_knowledge_index (id, build_id, index_version, embedding_model, dimension, chunk_count, "
+            "vectors_digest) VALUES (1, 'smoke-build', 'v1', 'fake', 1, 0, :d)", d="0" * 64)
+    flush_oper_log_for_test()  # 新增用户、角色的操作日志写完后再清理
     assert redis_client.exists(token_key)
 
-    rag_smoke.cleanup_smoke_data(env, [user_id], [role_id], [], [headers], {user_id}, marks)
+    records = rag_smoke.SmokeRecords(user_ids=[user_id], role_ids=[role_id], conversations=["smoke-conv-1"],
+                                     logins=[headers], operator_ids={user_id}, build_id="smoke-build")
+    rag_smoke.cleanup_smoke_data(env, records)
 
-    assert env.sql("SELECT COUNT(*) FROM sys_user WHERE user_id = :i", i=user_id)[0][0] == 0
-    assert env.sql("SELECT COUNT(*) FROM sys_role WHERE role_id = :i", i=role_id)[0][0] == 0
-    assert env.sql("SELECT COUNT(*) FROM sys_user_role WHERE user_id = :i OR role_id = :r", i=user_id, r=role_id)[0][0] == 0
-    assert env.sql("SELECT COUNT(*) FROM sys_role_menu WHERE role_id = :r", r=role_id)[0][0] == 0
-    assert env.sql("SELECT COUNT(*) FROM sys_logininfor WHERE info_id > :m", m=marks["login"])[0][0] == 0
+    count = lambda q, **kw: env.sql(q, **kw)[0][0]  # noqa: E731
+    assert count("SELECT COUNT(*) FROM sys_user WHERE user_id = :i", i=user_id) == 0
+    assert count("SELECT COUNT(*) FROM sys_role WHERE role_id = :i", i=role_id) == 0
+    assert count("SELECT COUNT(*) FROM sys_user_role WHERE user_id = :i OR role_id = :r", i=user_id, r=role_id) == 0
+    assert count("SELECT COUNT(*) FROM sys_role_menu WHERE role_id = :r", r=role_id) == 0
+    assert count("SELECT COUNT(*) FROM sys_logininfor WHERE user_name = 'smoke_cleanup_u'") == 0
+    assert count("SELECT COUNT(*) FROM sys_oper_log WHERE oper_param LIKE '%smoke\\_cleanup%'") == 0
+    assert count("SELECT COUNT(*) FROM agent_conversation WHERE conversation_id = 'smoke-conv-1'") == 0
+    assert count("SELECT COUNT(*) FROM agent_knowledge_index WHERE build_id = 'smoke-build'") == 0
     assert not redis_client.exists(token_key)
     assert not redis_client.exists(AGENT_RATE_LIMIT_KEY_PREFIX + str(user_id))
+
+
+def test_cleanup_keeps_non_smoke_data():
+    """
+    不按时间删、不清空共享表：非 smoke 的用户（即使 ID 被误传进来）、角色、日志、会话、知识库行、
+    其他用户的登录态都保留
+    """
+    from app.core.constants import AGENT_RATE_LIMIT_KEY_PREFIX
+    from app.core.oper_log import flush_oper_log_for_test
+    from app.core.redis_client import redis_client
+    from tests.agent_helpers import MENU_USER, add_role, add_user
+
+    env, client, admin = _cleanup_env()
+    # 非 smoke 数据：用户、角色、它们产生的操作日志和登录日志、会话、知识库文档与分块、索引行、计数
+    keep_role = add_role(client, admin, "ag_keep_r", [MENU_USER])
+    keep_user = add_user(client, admin, "ag_keep_u", [keep_role])
+    env.login("ag_keep_u", "Passw0rd!")
+    env.sql("INSERT INTO agent_conversation (conversation_id, user_id, title) VALUES ('keep-conv', :u, 't')", u=keep_user)
+    env.sql("INSERT INTO agent_knowledge_doc (doc_id, title, version, required_perms, sources, content_hash, chunk_count) "
+            "VALUES ('keep-doc', 't', 1, '[]', '[]', :h, 1)", h="0" * 64)
+    env.sql("INSERT INTO agent_knowledge_chunk (chunk_id, doc_id, title, section, seq, content, content_hash, "
+            "required_perms, vector_id, embedding_model, index_version) "
+            "VALUES ('keep-doc#01', 'keep-doc', 't', 's', 1, 'c', :h, '[]', 99999, 'fake', 'v1')", h="0" * 64)
+    env.sql("INSERT INTO agent_knowledge_index (id, build_id, index_version, embedding_model, dimension, chunk_count, "
+            "vectors_digest) VALUES (1, 'keep-build', 'v1', 'fake', 1, 1, :d)", d="0" * 64)
+    redis_client.set(AGENT_RATE_LIMIT_KEY_PREFIX + str(keep_user), 1)
+    flush_oper_log_for_test()
+    count = lambda q, **kw: env.sql(q, **kw)[0][0]  # noqa: E731
+    before = {"oper": count("SELECT COUNT(*) FROM sys_oper_log"),
+              "login": count("SELECT COUNT(*) FROM sys_logininfor WHERE user_name IN ('admin', 'ag_keep_u')")}
+    smoke_user, smoke_role = _make_smoke_user(client, admin, "smoke_only_u", "smoke_only_r")
+    flush_oper_log_for_test()
+
+    try:
+        # 非 smoke 的用户、角色 ID 被误传进来，也因名称前缀核对而不删；只记录了 smoke 的知识库文档和构建
+        records = rag_smoke.SmokeRecords(user_ids=[keep_user, smoke_user], role_ids=[keep_role, smoke_role],
+                                         conversations=["smoke-conv-x"], knowledge_doc_ids=["smoke-doc"],
+                                         build_id="smoke-build", operator_ids={9999999})
+        rag_smoke.cleanup_smoke_data(env, records)
+
+        assert count("SELECT COUNT(*) FROM sys_user WHERE user_id = :i AND del_flag = '0'", i=keep_user) == 1
+        assert count("SELECT COUNT(*) FROM sys_role WHERE role_id = :i", i=keep_role) == 1
+        assert count("SELECT COUNT(*) FROM sys_user_role WHERE user_id = :i", i=keep_user) == 1
+        assert count("SELECT COUNT(*) FROM sys_user WHERE user_id = :i", i=smoke_user) == 0
+        # 非 smoke 的日志数量不变（smoke 用户、角色的新增日志已删除）
+        assert count("SELECT COUNT(*) FROM sys_oper_log") == before["oper"]
+        assert count("SELECT COUNT(*) FROM sys_logininfor WHERE user_name IN ('admin', 'ag_keep_u')") == before["login"]
+        assert count("SELECT COUNT(*) FROM agent_conversation WHERE conversation_id = 'keep-conv'") == 1
+        assert count("SELECT COUNT(*) FROM agent_knowledge_doc WHERE doc_id = 'keep-doc'") == 1
+        assert count("SELECT COUNT(*) FROM agent_knowledge_chunk WHERE doc_id = 'keep-doc'") == 1
+        assert count("SELECT COUNT(*) FROM agent_knowledge_index WHERE build_id = 'keep-build'") == 1
+        assert redis_client.exists(AGENT_RATE_LIMIT_KEY_PREFIX + str(keep_user))
+    finally:
+        env.sql("DELETE FROM agent_conversation WHERE conversation_id = 'keep-conv'")
+        for table in ("agent_knowledge_chunk", "agent_knowledge_doc"):
+            env.sql(f"DELETE FROM {table} WHERE doc_id = 'keep-doc'")
+        env.sql("DELETE FROM agent_knowledge_index WHERE build_id = 'keep-build'")
 
 
 def test_cleanup_refuses_non_test_database(monkeypatch):
@@ -265,7 +343,7 @@ def test_cleanup_refuses_non_test_database(monkeypatch):
 
     monkeypatch.setattr(settings, "mysql_database", "ry-vue")
     with pytest.raises(SystemExit):
-        rag_smoke.cleanup_smoke_data(env, [1], [1], [], [], set(), {})
+        rag_smoke.cleanup_smoke_data(env, rag_smoke.SmokeRecords(user_ids=[1], role_ids=[1]))
 
 
 def test_r2_legacy_user_id_call_counts_as_other_user():
