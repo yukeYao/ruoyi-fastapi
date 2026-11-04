@@ -76,6 +76,8 @@ def e2e_section(e: dict) -> str:
             cells.append(_pct(m) if m else "不适用")
         cats.append(f"| {label} | " + " | ".join(cells) + " |")
     stopped = [f"- **预算保护提前停止**：{e['stopped']}；以下只包含停止前已完成的运行。"] if e.get("stopped") else []
+    if e.get("remaining"):
+        stopped.append(f"- **评估未完成**：还有 {e['remaining']} 次运行没有执行，以下只包含已完成的运行。")
     return "\n".join([*stopped, f"- 门槛来源：{e['thresholds_source']}；每条用例运行 {e['runs']} 次；实际模型 ID：{'、'.join(e['model_ids']) or '未返回'}",
                       "", head, sep, *body, "", "分类通过率（不适用：该方案没有运行这一类，原因见方法说明）：", "",
                       cat_head, sep, *cats])

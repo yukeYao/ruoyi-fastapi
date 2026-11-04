@@ -96,6 +96,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--variants", nargs="+", default=["no_rag", "bm25", "vector", "hybrid", "hybrid_tools"])
     parser.add_argument("--cases", nargs="+", help="端到端只运行这些用例 id")
     parser.add_argument("--out", type=Path, help="复用已有的运行目录（例如先跑 retrieval、再跑 e2e）")
+    parser.add_argument("--resume", action="store_true", help="端到端：跳过本目录已完成的运行，接着跑")
+    parser.add_argument("--max-minutes", type=float, help="端到端：本次运行到这个时长就保存并停下（配合 --resume 分段运行）")
     args = parser.parse_args(argv)
 
     out_dir = args.out or RESULTS_DIR / (datetime.now().strftime("%Y%m%d-%H%M%S") + "-rag-eval")
@@ -110,7 +112,7 @@ def main(argv: list[str] | None = None) -> None:
 
     from evals.rag import pipeline
 
-    pipeline.run(out_dir, args.stage, args.runs, args.variants, args.cases)
+    pipeline.run(out_dir, args.stage, args.runs, args.variants, args.cases, args.resume, args.max_minutes)
 
 
 if __name__ == "__main__":

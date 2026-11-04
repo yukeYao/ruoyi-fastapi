@@ -355,3 +355,32 @@ def test_e2e_stops_when_over_budget_and_keeps_results(eval_dirs, scripted_model,
     traces = json.loads((eval_dirs / "traces.json").read_text(encoding="utf-8"))
     assert len(traces) == 1 and "费用" in result["stopped"]
     assert json.loads((eval_dirs / "e2e.json").read_text(encoding="utf-8"))["stopped"] == result["stopped"]
+
+
+def test_e2e_resume_skips_completed_runs(eval_dirs, scripted_model, monkeypatch):
+    """分段运行：时长用完就停下保存（0 分钟时一条都不跑）；--resume 只补跑缺的，不重复已完成的"""
+    from langchain_core.messages import AIMessage
+
+    from app.rag import embedding
+    from app.rag.embedding import FakeEmbeddingModel
+    from evals import environment as env
+    from evals.rag import pipeline
+    from evals.rag_smoke import SmokeRecords, cleanup_smoke_data
+
+    model = FakeEmbeddingModel()
+    monkeypatch.setattr(embedding, "get_embedding_model", lambda: model)
+    scripted_model(*[AIMessage(content="知识库中没有找到相关说明") for _ in range(6)])
+    def invoke(**kw):
+        # 与 pipeline.run 一样：每次调用各自准备数据、结束时清理
+        records = SmokeRecords()
+        try:
+            return pipeline.run_e2e(eval_dirs, model, records, kw.pop("runs"), ["hybrid"], ["N01"], **kw)
+        finally:
+            cleanup_smoke_data(env, records)
+
+    paused = invoke(runs=2, max_minutes=0)
+    assert paused["paused"] and paused["remaining"] == 2
+    assert invoke(runs=1, resume=True)["remaining"] == 0
+    second = invoke(runs=2, resume=True)
+    traces = json.loads((eval_dirs / "traces.json").read_text(encoding="utf-8"))
+    assert sorted(t["run"] for t in traces) == [1, 2] and second["remaining"] == 0 and not second["paused"]

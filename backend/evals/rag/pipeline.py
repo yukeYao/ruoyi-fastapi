@@ -10,6 +10,7 @@
 """
 import json
 import shutil
+import time
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -117,7 +118,13 @@ def _save_traces(out_dir: Path, traces: list[dict], scored: list[dict]) -> None:
 
 
 def run_e2e(out_dir: Path, model, records: SmokeRecords, runs: int, variant_names: list[str],
-            case_ids: list[str] | None, prior_embedding_tokens: int = 0) -> dict:
+            case_ids: list[str] | None, prior_embedding_tokens: int = 0, resume: bool = False,
+            max_minutes: float | None = None) -> dict:
+    """
+    resume：读取本目录已有的 traces/scored，跳过已完成的（方案, 用例, 第几次），接着运行；
+    max_minutes：本次调用运行到这个时长就停下保存（不是预算停止，下次 --resume 继续）。
+    两者配合把很长的评估拆成多次前台运行，避免评估在后台运行时与 pytest 抢测试库
+    """
     docs_dir = out_dir / "docs"
     docs_dir.mkdir(exist_ok=True)
     for path in [*DOCS_DIR.glob("*.md"), *FIXTURE_DOCS.glob("*.md")]:
@@ -132,13 +139,24 @@ def run_e2e(out_dir: Path, model, records: SmokeRecords, runs: int, variant_name
     headers = runner.prepare_data(records)
     cases = [c for c in load_e2e_cases() if not case_ids or c["id"] in case_ids]
     traces, scored = [], []
-    stopped = ""
+    if resume and (out_dir / "traces.json").exists():
+        traces = json.loads((out_dir / "traces.json").read_text(encoding="utf-8"))
+        scored = json.loads((out_dir / "scored.json").read_text(encoding="utf-8"))
+    done = {(t["variant"], t["case_id"], t["run"]) for t in traces}
+    deadline = time.monotonic() + max_minutes * 60 if max_minutes is not None else None
+    stopped = paused = ""
     for name in variant_names:
         variant = runner.VARIANTS[name]
         t = Thresholds(**tuned[variant.mode]["thresholds"]) if variant.mode in tuned else defaults
         for case in [c for c in cases if c["category"] in variant.categories]:
             for run in range(1, runs + 1):
-                if stopped:
+                if stopped or paused:
+                    break
+                if (name, case["id"], run) in done:
+                    continue
+                if deadline is not None and time.monotonic() >= deadline:
+                    paused = f"本次运行达到 {max_minutes} 分钟，已保存，用 --resume 继续"
+                    print(paused, flush=True)
                     break
                 trace = runner.run_case(case, variant, run, headers, t, model, records)
                 result = metrics.score_e2e(case, trace)
@@ -159,7 +177,10 @@ def run_e2e(out_dir: Path, model, records: SmokeRecords, runs: int, variant_name
     summary = {name: metrics.aggregate_e2e([s for s in scored if s["variant"] == name],
                                            [t for t in traces if t["variant"] == name], PRICES)
                for name in ran}
+    remaining = sum(1 for name in variant_names for c in cases if c["category"] in runner.VARIANTS[name].categories
+                    for r in range(1, runs + 1) if (name, c["id"], r) not in {(t["variant"], t["case_id"], t["run"]) for t in traces})
     result = {"index": index, "thresholds_source": thresholds_source, "runs": runs, "stopped": stopped,
+              "paused": paused, "remaining": remaining,
               "dataset_version": json.loads(E2E_DATASET.read_text(encoding="utf-8"))["version"],
               "model_ids": sorted({n for t in traces for n in t["model_names"]}), "summary": summary}
     _save_traces(out_dir, traces, scored)
@@ -168,7 +189,8 @@ def run_e2e(out_dir: Path, model, records: SmokeRecords, runs: int, variant_name
     return result
 
 
-def run(out_dir: Path, stage: str, runs: int, variant_names: list[str], case_ids: list[str] | None) -> None:
+def run(out_dir: Path, stage: str, runs: int, variant_names: list[str], case_ids: list[str] | None,
+        resume: bool = False, max_minutes: float | None = None) -> None:
     _check_environment(out_dir, stage)
     model = embedding.get_embedding_model()
     # 整次评估共用一个 Embedding 客户端：它累计接口返回的 Token，用于统计成本
@@ -188,8 +210,9 @@ def run(out_dir: Path, stage: str, runs: int, variant_names: list[str], case_ids
             r = run_retrieval(out_dir, model, records)
             print(f"检索评估完成：dev {r['n_dev']} 条、test {r['n_test']} 条")
         if stage in ("e2e", "all"):
-            e = run_e2e(out_dir, model, records, runs, variant_names, case_ids, prior_embedding)
-            print(f"端到端评估完成：模型 ID {e['model_ids']}" + (f"；提前停止：{e['stopped']}" if e["stopped"] else ""))
+            e = run_e2e(out_dir, model, records, runs, variant_names, case_ids, prior_embedding, resume, max_minutes)
+            print(f"端到端评估：剩余 {e['remaining']} 次；模型 ID {e['model_ids']}"
+                  + (f"；提前停止：{e['stopped']}" if e["stopped"] else ""))
         meta["embedding_tokens_total"] = prior_embedding + getattr(model, "total_tokens", 0)
         meta["stages"].append({"stage": stage, "commit": meta["commit"], "started": started.strftime("%Y-%m-%d %H:%M:%S"),
                                "finished": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
