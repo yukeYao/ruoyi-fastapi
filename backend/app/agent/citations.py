@@ -12,7 +12,15 @@
   不是回答的依据。
 回复正文保持纯文本显示，前端只渲染这里生成的 sources / references，不解析回复里的引用或链接。
 
-引用修复（graph.cite_node）由服务端在回复写进 additional_kwargs[REPAIR_KEY]，这里只读出来展示，不影响任何判断。
+引用修复（graph.cite_node）只用于纯知识问答（本轮没有调用任何业务工具），修复记录由服务端写进
+additional_kwargs[REPAIR_KEY]（修复前原文、修复后文本、句子与 chunkId 映射、模型 ID、Token）。
+修复补上的引用单独列为 autoSources、状态为 auto_cited，表示"自动关联，未核验"，不算作普通来源。
+
+来源只表示"这段内容来自本轮知识库检索"，不代表内容已被验证为真：服务端只能校验引用是否来自检索结果，
+不能校验回复里的句子是否忠实于片段。
+
+形似引用但不符合 chunkId 格式的标记（例如【密码错误锁定规则#01】）计入 suspiciousCitations：
+既不是合法来源，也不算 invalidCitations，正文不改，前端提示"存在无法核实的引用格式"。
 """
 import json
 import re
@@ -34,6 +42,10 @@ STATUS_UNCITED = "uncited"        # 本轮检索到了内容，但回复没有�
 STATUS_NOT_FOUND = "not_found"    # 本轮检索过，知识库没有找到相关内容
 STATUS_UNAVAILABLE = "unavailable"  # 本轮检索都失败了（索引不可用等）
 STATUS_NO_SEARCH = "no_search"    # 本轮没有检索，回复里却写了引用（全部无效）
+STATUS_AUTO_CITED = "auto_cited"  # 模型没写引用，服务端引用修复自动关联了分块（未核验）
+
+# 形似引用的标记：方括号里有 #数字。符合 CITATION_PATTERN 的是正式引用，其余计为疑似伪引用
+_CITATION_LIKE = re.compile(r"[\[【]([^\[\]【】\n]{1,80}?#\s*\d{1,4})\s*[\]】]")
 
 
 @dataclass
@@ -65,6 +77,22 @@ def _parse_rows(message: ToolMessage) -> list[dict] | None:
 def cited_ids(text: str) -> list[str]:
     """回复里引用的 chunkId，按首次出现的顺序去重"""
     return list(dict.fromkeys(CITATION_PATTERN.findall(text or "")))
+
+
+def suspicious_count(text: str) -> int:
+    """形似引用、但不符合 chunkId 格式的标记个数（按出现次数）"""
+    return sum(1 for m in _CITATION_LIKE.finditer(text or "") if not CITATION_PATTERN.fullmatch(m.group(0)))
+
+
+def used_business_tools(messages: list[BaseMessage], index: int) -> bool:
+    """
+    本轮（最后一条用户消息之后、第 index 条之前）是否调用过 search_knowledge 以外的工具。
+    用过业务工具的回复会夹带实时数据（用户、角色、权限等），引用修复可能把知识库来源挂到这些实时结论上，
+    所以这类回复一律不做修复——这是按工具调用记录的确定性规则，不判断用户意图
+    """
+    start = max((i for i, m in enumerate(messages[:index]) if m.type == "human"), default=-1) + 1
+    return any(isinstance(m, AIMessage) and any(c.get("name") != SEARCH_TOOL for c in m.tool_calls)
+               for m in messages[start:index])
 
 
 def _walk(messages: list[BaseMessage]) -> Iterator[tuple[int, AIMessage, TurnKnowledge]]:
@@ -105,27 +133,49 @@ def turn_knowledge(messages: list[BaseMessage], index: int) -> TurnKnowledge:
     return TurnKnowledge()
 
 
-def _repair_status(message: AIMessage) -> str | None:
+def repair_record(message: AIMessage) -> dict | None:
+    """服务端写的修复记录；状态不认识的一律当作没有"""
     value = (message.additional_kwargs or {}).get(REPAIR_KEY)
-    status = value.get("status") if isinstance(value, dict) else None
-    return status if status in (REPAIR_SUCCEEDED, REPAIR_FAILED) else None
+    if not isinstance(value, dict) or value.get("status") not in (REPAIR_SUCCEEDED, REPAIR_FAILED):
+        return None
+    return value
+
+
+def repair_info(record: dict | None) -> dict | None:
+    """接口返回的修复信息（与 checkpoint 里的记录一致，字段名转成 camelCase）"""
+    if record is None:
+        return None
+    return {"status": record["status"], "original": record.get("original", ""), "repaired": record.get("repaired", ""),
+            "mapping": record.get("mapping", []), "modelName": record.get("model_name"),
+            "inputTokens": record.get("input_tokens", 0), "outputTokens": record.get("output_tokens", 0)}
 
 
 def annotate(messages: list[BaseMessage]) -> dict[int, dict]:
     """
     为有内容的模型回复生成引用信息：
-    {消息下标: {"status", "sources", "references", "invalidCitations", "citationRepair"}}。
-    本轮没有检索、回复里也没有引用的消息不出现在结果里。
+    {消息下标: {"status", "sources", "autoSources", "references", "invalidCitations", "suspiciousCitations",
+               "citationRepair"}}。
+    本轮没有检索、回复里也没有引用或疑似引用的消息不出现在结果里。
     """
     result: dict[int, dict] = {}
     for index, message, turn in _walk(messages):
         text = message.content if isinstance(message.content, str) else ""
         cited = cited_ids(text)
-        if not text or not (cited or turn.searched):
+        suspicious = suspicious_count(text)
+        if not text or not (cited or suspicious or turn.searched):
             continue
-        sources = [turn.valid[c] for c in cited if c in turn.valid]
+        record = repair_record(message)
+        # 修复补上的引用：只认修复记录里的映射，且必须在本轮合法集合里
+        auto_ids = []
+        if record and record["status"] == REPAIR_SUCCEEDED:
+            auto_ids = list(dict.fromkeys(c for item in record.get("mapping", []) for c in item.get("chunkIds", [])
+                                          if c in turn.valid))
+        sources = [turn.valid[c] for c in cited if c in turn.valid and c not in auto_ids]
+        auto_sources = [turn.valid[c] for c in auto_ids]
         if sources:
             status = STATUS_CITED
+        elif auto_sources:
+            status = STATUS_AUTO_CITED
         elif turn.had_hits:
             status = STATUS_UNCITED
         elif turn.had_empty:
@@ -134,10 +184,11 @@ def annotate(messages: list[BaseMessage]) -> dict[int, dict]:
             status = STATUS_UNAVAILABLE
         else:
             status = STATUS_NO_SEARCH
-        result[index] = {"status": status, "sources": sources,
+        result[index] = {"status": status, "sources": sources, "autoSources": auto_sources,
                          "references": [v for k, v in turn.valid.items() if k not in cited],
                          "invalidCitations": sum(1 for c in cited if c not in turn.valid),
-                         "citationRepair": _repair_status(message)}
+                         "suspiciousCitations": suspicious,
+                         "citationRepair": repair_info(record)}
     return result
 
 

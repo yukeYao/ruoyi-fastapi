@@ -4,7 +4,7 @@ import json
 from fastapi.testclient import TestClient
 
 from app.agent.policy import msg_no_permission
-from app.agent.tools import TOOLS
+from app.agent.tools import MSG_USER_UNAVAILABLE, TOOLS
 from main import app
 from tests.agent_helpers import (
     MENU_AGENT,
@@ -111,10 +111,11 @@ def test_multi_role_data_scope_matches_route(scripted_model):
 def test_get_user_detail_out_of_scope_is_blocked(scripted_model):
     from tests.agent_helpers import MENU_USER_QUERY
 
-    c = call("get_user_detail", {"user_id": 1})
+    c = call("get_user_detail", {"user_name": "admin"})
     scripted_model(tool_msg(c), final())
     # 本部门(105)数据权限，查部门 103 的 admin
     _, headers = user_with_menus(client, "scope", [MENU_AGENT, MENU_USER, MENU_USER_QUERY], data_scope="3")
     result = tool_results(chat(client, headers, "查 admin"))[c["id"]]
     assert result["status"] == "error"
-    assert "没有权限访问用户数据" in result["content"]
+    # 范围外与不存在同一句话，见 test_agent_user_detail.py
+    assert MSG_USER_UNAVAILABLE in result["content"]

@@ -162,8 +162,7 @@ def test_why_test01_cannot_see_agent_uses_knowledge_and_live_tools(kb, scripted_
     scripted_model(
         tool_msg(call("search_knowledge", {"query": "为什么看不到智能助手菜单"}, "c1")),
         tool_msg(call("search_users", {"user_name": "test01"}, "c2")),
-        lambda messages, tools: tool_msg(call("get_user_detail", {
-            "user_id": _tool_json(messages, "search_users")["untrusted_data"]["rows"][0]["userId"]}, "c3")),
+        tool_msg(call("get_user_detail", {"user_name": "test01"}, "c3")),
         ask_role,
         answer,
     )

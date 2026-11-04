@@ -149,7 +149,7 @@ def test_no_secret_in_results_response_or_checkpoint(scripted_model, agent_check
 
     calls = [
         call("search_users", {"user_name": "ag_canary_u"}),
-        call("get_user_detail", {"user_id": user_id}),
+        call("get_user_detail", {"user_name": "ag_canary_u"}),
         call("list_online_sessions", {"user_name": "ag_canary_u"}),
         call("search_login_logs", {"user_name": "ag_canary_u"}),
     ]

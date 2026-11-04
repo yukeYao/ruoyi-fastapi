@@ -1,23 +1,27 @@
 """
-引用修复（graph.cite_node）：检索到合法分块但回复没有合法引用时，服务端最多发起一次修复调用。
-覆盖：修复成功 / 失败、修复调用不新增工具调用也不碰写操作、审批恢复后的修复边界、sources 与 references 分开，
-以及普通请求、SSE、历史消息三处一致。模型用 ScriptedChatModel，Embedding 用 FakeEmbeddingModel。
+引用修复（graph.cite_node）：只用于纯知识问答（本轮只调用过 search_knowledge）。检索到合法分块但回复没有合法引用时，
+服务端最多发起一次修复调用；成功后状态是 auto_cited（自动关联，未核验），补上的分块在 autoSources，不在 sources。
+本轮调用过任何业务工具（包括写工具、审批恢复的同一轮）就不修复，保持 uncited。
+覆盖普通请求、SSE、历史消息一致。模型用 ScriptedChatModel，Embedding 用 FakeEmbeddingModel。
 """
 import json
 
 import pytest
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
+from sqlalchemy import text
 
 from app.core.database import SessionLocal
 from main import app
-from tests.agent_helpers import add_user, call, chat, final, tool_msg
+from tests.agent_helpers import MENU_AGENT, MENU_ROLE, MENU_USER, add_role, add_user, call, chat, final, tool_msg
 from tests.conftest import auth_headers
 from tests.test_agent_knowledge import _status, _stream, kb  # noqa: F401  kb 是夹具
 
 client = TestClient(app)
 
 ANSWER = "需要 agent:chat:use 权限。授权后要重新登录。"
+KEYS = ("reply", "sources", "autoSources", "references", "invalidCitations", "suspiciousCitations",
+        "knowledgeStatus", "citationRepair")
 
 
 def _search(query="智能助手菜单权限 重新登录", call_id="s1"):
@@ -27,10 +31,9 @@ def _search(query="智能助手菜单权限 重新登录", call_id="s1"):
 def _repair(seen: dict, pick=lambda chunks: [chunks[0]["chunkId"]], sentence=1):
     """修复调用的脚本：记录服务端发来的输入，按 pick 选分块"""
     def reply(messages, tools):
-        payload = json.loads(messages[-1].content)
-        seen["payload"] = payload
-        seen["tools"] = list(tools)
-        return AIMessage(content=json.dumps({"citations": [{"sentence": sentence, "chunkIds": pick(payload["chunks"])}]}))
+        seen["payload"] = json.loads(messages[-1].content)
+        seen["input"] = list(messages)
+        return AIMessage(content=json.dumps({"citations": [{"sentence": sentence, "chunkIds": pick(seen["payload"]["chunks"])}]}))
     return reply
 
 
@@ -44,37 +47,46 @@ def _run(stream: bool, headers: dict, message: str) -> dict:
     return body["data"]
 
 
-def _history_last_ai(headers, conversation_id):
+def _history_knowledge(headers, conversation_id):
     history = client.get(f"/agent/conversation/{conversation_id}/messages", headers=headers).json()["data"]
-    return [m for m in history if m["type"] == "ai"][-1]
+    return [m for m in history if m["type"] == "ai" and m["content"]][-1]
 
+
+def _assert_history_matches(headers, data):
+    last = _history_knowledge(headers, data["conversationId"])
+    assert last["content"] == data["reply"]
+    knowledge = last.get("knowledge") or {}
+    for key in KEYS[1:]:
+        api_key = {"knowledgeStatus": "status"}.get(key, key)
+        assert knowledge.get(api_key) == data[key], key
+
+
+# ---------------------------------------------------------------------------
+# 纯知识问答：修复成功 -> auto_cited，保存原文和映射
+# ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_repair_success_consistent_across_normal_sse_history(kb, scripted_model, stream):
+def test_pure_knowledge_repair_is_auto_cited_with_original_and_mapping(kb, scripted_model, stream):
     seen = {}
     fake = scripted_model(_search(), final(ANSWER), _repair(seen))
     admin = auth_headers(client)
     data = _run(stream, admin, "智能助手需要什么权限")
 
     chunk = seen["payload"]["chunks"][0]["chunkId"]
-    # 正文一个字不变，只在第 1 句句末标点前插入 [chunkId]
-    assert data["reply"] == ANSWER.replace("权限。", f"权限[{chunk}]。", 1)
-    assert data["knowledgeStatus"] == "cited" and data["citationRepair"] == "succeeded"
-    assert [s["chunkId"] for s in data["sources"]] == [chunk] and data["invalidCitations"] == 0
-    # 其余检索到的分块是"参考资料"，与来源分开
+    repaired = ANSWER.replace("权限。", f"权限[{chunk}]。", 1)
+    assert data["reply"] == repaired
+    # 自动关联的分块不算普通来源
+    assert data["knowledgeStatus"] == "auto_cited" and data["sources"] == []
+    assert [s["chunkId"] for s in data["autoSources"]] == [chunk]
     assert chunk not in {r["chunkId"] for r in data["references"]}
-    assert {r["chunkId"] for r in data["references"]} == {c["chunkId"] for c in seen["payload"]["chunks"]} - {chunk}
-    # 修复调用看到的句子就是原回复
-    assert "".join(s["text"] for s in seen["payload"]["sentences"]) == ANSWER
+    repair = data["citationRepair"]
+    assert repair["status"] == "succeeded" and repair["original"] == ANSWER and repair["repaired"] == repaired
+    assert repair["mapping"] == [{"sentence": 1, "text": "需要 agent:chat:use 权限。", "chunkIds": [chunk]}]
+    assert {"modelName", "inputTokens", "outputTokens"} <= set(repair)
+    # 修复调用的输入只有修复提示和一条 JSON：没有对话历史，也就看不到工具定义和其他工具结果
+    assert len(seen["input"]) == 2 and seen["input"][0].type == "system"
     assert len(fake.calls) == 3
-
-    # 修复后的回复替换了原回复（同一条消息），历史接口给出同样的来源和参考资料
-    last = _history_last_ai(admin, data["conversationId"])
-    assert last["content"] == data["reply"]
-    for key in ("sources", "references", "status", "citationRepair", "invalidCitations"):
-        assert last["knowledge"][key] == data[{"status": "knowledgeStatus"}.get(key, key)]
-    history = client.get(f"/agent/conversation/{data['conversationId']}/messages", headers=admin).json()["data"]
-    assert sum(1 for m in history if m["type"] == "ai" and m["content"]) == 1
+    _assert_history_matches(admin, data)
 
 
 def test_normal_and_sse_give_identical_repair_result(kb, scripted_model):
@@ -83,8 +95,7 @@ def test_normal_and_sse_give_identical_repair_result(kb, scripted_model):
     for stream in (False, True):
         scripted_model(_search(), final(ANSWER), _repair({}))
         results.append(_run(stream, admin, "智能助手需要什么权限"))
-    keys = ("reply", "sources", "references", "invalidCitations", "knowledgeStatus", "citationRepair")
-    assert {k: results[0][k] for k in keys} == {k: results[1][k] for k in keys}
+    assert {k: results[0][k] for k in KEYS} == {k: results[1][k] for k in KEYS}
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -98,9 +109,10 @@ def test_repair_failure_keeps_uncited(kb, scripted_model, stream, bad_output):
     admin = auth_headers(client)
     data = _run(stream, admin, "智能助手需要什么权限")
     assert data["reply"] == ANSWER
-    assert data["knowledgeStatus"] == "uncited" and data["citationRepair"] == "failed"
-    assert data["sources"] == [] and data["references"]  # 检索结果只作为参考资料，不会被标成已引用
-    assert _history_last_ai(admin, data["conversationId"])["knowledge"]["citationRepair"] == "failed"
+    assert data["knowledgeStatus"] == "uncited" and data["citationRepair"]["status"] == "failed"
+    assert data["citationRepair"]["original"] == ANSWER and data["citationRepair"]["mapping"] == []
+    assert data["sources"] == [] and data["autoSources"] == [] and data["references"]
+    _assert_history_matches(admin, data)
 
 
 def test_repair_model_error_is_recorded_not_raised(kb, scripted_model):
@@ -110,7 +122,7 @@ def test_repair_model_error_is_recorded_not_raised(kb, scripted_model):
     scripted_model(_search(), final(ANSWER), boom)
     body = chat(client, auth_headers(client), "智能助手需要什么权限")
     assert body["code"] == 200
-    assert body["data"]["citationRepair"] == "failed" and body["data"]["reply"] == ANSWER
+    assert body["data"]["citationRepair"]["status"] == "failed" and body["data"]["reply"] == ANSWER
     assert "CANARY" not in json.dumps(body, ensure_ascii=False)
 
 
@@ -119,40 +131,21 @@ def test_repair_cannot_add_tool_calls_or_writes(kb, scripted_model):
     add_user(client, auth_headers(client), "kb_rep_victim", [])
     sneaky = AIMessage(content="", tool_calls=[call("change_user_status", {"user_name": "kb_rep_victim", "status": "1"}, "x1")])
     scripted_model(_search(), final(ANSWER), sneaky)
-    admin = auth_headers(client)
-    data = chat(client, admin, "智能助手需要什么权限")["data"]
-    assert data["citationRepair"] == "failed" and data["pendingAction"] is None
+    data = chat(client, auth_headers(client), "智能助手需要什么权限")["data"]
+    assert data["citationRepair"]["status"] == "failed" and data["pendingAction"] is None
     assert [c["name"] for m in data["messages"] if m["type"] == "ai" for c in m["toolCalls"]] == ["search_knowledge"]
     assert not any(m["type"] == "tool" and m["toolCallId"] == "x1" for m in data["messages"])
     assert _status("kb_rep_victim") == "0"
     db = SessionLocal()
     try:
-        from sqlalchemy import text
         assert db.execute(text("SELECT COUNT(*) FROM agent_action WHERE conversation_id = :c"),
                           {"c": data["conversationId"]}).scalar_one() == 0
     finally:
         db.close()
 
 
-def test_repair_call_input_is_isolated(kb, scripted_model):
-    """
-    修复调用的输入只有修复提示和一条 JSON（句子 + 本轮分块），没有对话历史和工具定义。
-    "不绑定工具"由 cite_node 直接调用 ctx.model.invoke 保证（真实模型的 bind_tools 返回新对象，不改原模型）；
-    即使模型仍返回工具调用也会被忽略，见 test_repair_cannot_add_tool_calls_or_writes
-    """
-    seen = {}
-    fake = scripted_model(_search(), final(ANSWER), _repair(seen))
-    chat(client, auth_headers(client), "智能助手需要什么权限")
-    # 修复调用的输入只有系统提示和一条 JSON：没有对话历史，也就看不到之前的工具结果
-    repair_input = fake.calls[-1]
-    assert len(repair_input) == 2 and repair_input[0].type == "system" and repair_input[1].type == "human"
-
-
-@pytest.mark.parametrize("script_tail", [
-    [final("需要 agent:chat:use [kbaccess#01]。")],   # 已经有合法引用
-])
-def test_no_repair_when_already_cited(kb, scripted_model, script_tail):
-    fake = scripted_model(_search(), *script_tail, final("不应该被调用"))
+def test_no_repair_when_already_cited(kb, scripted_model):
+    fake = scripted_model(_search(), final("需要 agent:chat:use [kbaccess#01]。"), final("不应该被调用"))
     data = chat(client, auth_headers(client), "智能助手需要什么权限")["data"]
     assert data["knowledgeStatus"] == "cited" and data["citationRepair"] is None and len(fake.calls) == 2
 
@@ -168,36 +161,60 @@ def test_no_repair_without_hits_or_search(kb, scripted_model):
 
 
 # ---------------------------------------------------------------------------
-# 审批恢复后的修复边界
+# 用过业务工具就不修复（确定性规则）
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_repair_after_approval_uses_same_turn_chunks_and_executes_once(kb, scripted_model, stream):
-    """同一轮：检索 -> 写操作 -> 批准 -> 回复没写引用 -> 修复。修复只用本轮中断前检索到的分块，写操作只执行一次"""
-    add_user(client, auth_headers(client), "kb_rep_same", [])
-    seen = {}
-    scripted_model(_search(), tool_msg(call("change_user_status", {"user_name": "kb_rep_same", "status": "1"}, "w1")),
-                   final("已停用 kb_rep_same。授权后要重新登录。"), _repair(seen, sentence=2))
+def test_no_repair_after_business_tool(kb, scripted_model, stream):
+    fake = scripted_model(tool_msg(call("search_knowledge", {"query": "智能助手菜单权限"}, "s1"),
+                                   call("list_roles", {}, "r1")),
+                          final(ANSWER), final("不应该被调用"))
     admin = auth_headers(client)
-    first = chat(client, admin, "停用 kb_rep_same")["data"]
-    retrieved = {r["chunkId"] for r in json.loads(
-        next(m for m in first["messages"] if m["type"] == "tool")["content"])["untrusted_data"]["rows"]}
-    action_id = first["pendingAction"]["actionId"]
+    data = _run(stream, admin, "智能助手需要什么权限，有哪些角色")
+    assert data["knowledgeStatus"] == "uncited" and data["citationRepair"] is None
+    assert data["sources"] == [] and data["autoSources"] == [] and data["references"]
+    assert len(fake.calls) == 2
+    _assert_history_matches(admin, data)
+
+
+def test_r2_style_wrong_conclusion_gets_no_auto_citation(kb, scripted_model):
+    """
+    复现冒烟 R2-2：查了别的用户和别的角色，回复把它说成目标用户的情况、且没写引用。
+    用过业务工具，所以不修复：错误结论不会挂上知识库来源，检索片段只作为参考资料
+    """
+    admin = auth_headers(client)
+    role_id = add_role(client, admin, "kb_r2_r", [MENU_USER])
+    add_user(client, admin, "kb_r2_u", [role_id])
+    wrong = "kb_r2_u 的角色是普通角色，拥有 agent:chat:use 权限。可能只是需要重新登录。"
+    fake = scripted_model(_search("看不到智能助手"),
+                          tool_msg(call("get_user_detail", {"user_name": "admin"}, "u1")),
+                          tool_msg(call("get_role_permissions", {"role_name": "普通角色", "perm": "agent:chat:use"}, "r1")),
+                          final(wrong), AIMessage(content=json.dumps({"citations": [{"sentence": 1, "chunkIds": ["kbaccess#01"]}]})))
+    data = chat(client, admin, "为什么 kb_r2_u 看不到智能助手")["data"]
+    assert data["reply"] == wrong
+    assert data["knowledgeStatus"] == "uncited" and data["citationRepair"] is None
+    assert data["sources"] == [] and data["autoSources"] == []
+    assert len(fake.calls) == 4  # 第 5 项（修复）没有被调用
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_no_repair_after_approval_in_same_turn(kb, scripted_model, stream):
+    """同一轮：检索 -> 写操作 -> 批准 -> 回复没写引用。写工具也是业务工具：不修复，写操作只执行一次"""
+    add_user(client, auth_headers(client), "kb_rep_same", [])
+    fake = scripted_model(_search(), tool_msg(call("change_user_status", {"user_name": "kb_rep_same", "status": "1"}, "w1")),
+                          final("已停用 kb_rep_same。授权后要重新登录。"), final("不应该被调用"))
+    admin = auth_headers(client)
+    action_id = chat(client, admin, "停用 kb_rep_same")["data"]["pendingAction"]["actionId"]
     if stream:
         data = _stream(admin, action_id=action_id)[-1][1]
     else:
         data = client.post(f"/agent/action/{action_id}/approve", headers=admin).json()["data"]
-
     assert data["action"]["status"] == "SUCCEEDED" and data["pendingAction"] is None
-    assert data["citationRepair"] == "succeeded" and data["knowledgeStatus"] == "cited"
-    assert {c["chunkId"] for c in seen["payload"]["chunks"]} == retrieved
+    assert data["knowledgeStatus"] == "uncited" and data["citationRepair"] is None and data["references"]
+    assert len(fake.calls) == 3
     assert _status("kb_rep_same") == "1"
     db = SessionLocal()
     try:
-        from sqlalchemy import text
-        assert db.execute(text("SELECT COUNT(*) FROM agent_action WHERE conversation_id = :c"),
-                          {"c": data["conversationId"]}).scalar_one() == 1
-        # 写操作日志只有一条：修复调用不会重新执行 execute
         assert db.execute(text("SELECT COUNT(*) FROM sys_oper_log WHERE method = '智能助手:change_user_status' "
                                "AND oper_url = :u"), {"u": f"/agent/action/{action_id}/approve"}).scalar_one() == 1
     finally:
@@ -205,15 +222,34 @@ def test_repair_after_approval_uses_same_turn_chunks_and_executes_once(kb, scrip
 
 
 def test_no_repair_with_chunks_from_earlier_turn(kb, scripted_model):
-    """上一轮检索到的分块：下一轮审批恢复后的回复不能用它们修复（本轮没有检索结果就不发起修复）"""
-    add_user(client, auth_headers(client), "kb_rep_old", [])
-    fake = scripted_model(_search(), final("需要 agent:chat:use [kbaccess#01]。"),
-                          tool_msg(call("change_user_status", {"user_name": "kb_rep_old", "status": "1"}, "w1")),
-                          final("已停用。授权后要重新登录。"), final("不应该被调用"))
+    """上一轮检索到的分块：下一轮的回复不能用它们修复"""
+    fake = scripted_model(_search(), final("需要 agent:chat:use [kbaccess#01]。"), final("授权后要重新登录。"),
+                          final("不应该被调用"))
     admin = auth_headers(client)
     first = chat(client, admin, "智能助手需要什么权限")["data"]
-    second = chat(client, admin, "停用 kb_rep_old", first["conversationId"])["data"]
-    data = client.post(f"/agent/action/{second['pendingAction']['actionId']}/approve", headers=admin).json()["data"]
-    assert data["action"]["status"] == "SUCCEEDED"
+    data = chat(client, admin, "那之后呢", first["conversationId"])["data"]
     assert data["knowledgeStatus"] is None and data["citationRepair"] is None and data["sources"] == []
-    assert len(fake.calls) == 4  # 没有第 5 次（修复）调用
+    assert len(fake.calls) == 3
+
+
+# ---------------------------------------------------------------------------
+# 展示状态：正常引用、无效引用、疑似伪引用在普通请求、SSE、历史消息里一致
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_valid_invalid_and_suspicious_citations_consistent(kb, scripted_model, stream):
+    reply = "需要 agent:chat:use [kbaccess#01]。另见 [made-up#01] 和【密码错误锁定规则#01】。"
+    fake = scripted_model(_search(), final(reply), final("不应该被调用"))
+    admin = auth_headers(client)
+    data = _run(stream, admin, "智能助手需要什么权限")
+    assert data["reply"] == reply  # 正文不改
+    assert [s["chunkId"] for s in data["sources"]] == ["kbaccess#01"] and data["knowledgeStatus"] == "cited"
+    assert data["invalidCitations"] == 1 and data["suspiciousCitations"] == 1
+    assert len(fake.calls) == 2
+    _assert_history_matches(admin, data)
+
+
+def test_suspicious_citation_without_search_is_reported(kb, scripted_model):
+    scripted_model(final("规则见【权限说明#01】。"))
+    data = chat(client, auth_headers(client), "规则是什么")["data"]
+    assert data["suspiciousCitations"] == 1 and data["sources"] == [] and data["knowledgeStatus"] == "no_search"

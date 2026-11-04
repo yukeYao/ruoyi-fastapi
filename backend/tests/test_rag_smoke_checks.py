@@ -40,15 +40,35 @@ def test_r1_requires_valid_source_not_wording():
     assert check("R1", _trace(sources=[SRC], knowledgeStatus="cited", invalidCitations=1))
 
 
-def test_r2_requires_live_role_check_and_source():
+def _r2_good():
+    detail = {"name": "get_user_detail", "payload": {"ok": True, "untrusted_data": {
+        "userName": rag_smoke.TARGET, "roles": [{"roleId": 100, "roleName": rag_smoke.TARGET_ROLE}]}}}
     role = {"name": "get_role_permissions", "payload": {"ok": True, "untrusted_data": {
         "roleName": rag_smoke.TARGET_ROLE, "perms": ["system:user:list"], "hasPerm": False}}}
-    good = _trace(tool_calls=[{"name": n, "args": {}} for n in ("search_knowledge", "search_users", "get_role_permissions")],
-                  tool_results=[role], knowledgeStatus="cited",
+    calls = [{"name": "search_knowledge", "args": {}}, {"name": "get_user_detail", "args": {"user_name": rag_smoke.TARGET}},
+             {"name": "get_role_permissions", "args": {"role_name": rag_smoke.TARGET_ROLE}}]
+    return _trace(tool_calls=calls, tool_results=[detail, role], knowledgeStatus="cited", citationRepair=None,
                   sources=[{**SRC, "docId": "agent-access", "chunkId": "agent-access#01"}])
-    assert check("R2", good) == []
-    no_live = {**good, "tool_calls": [{"name": "search_knowledge", "args": {}}], "tool_results": []}
+
+
+def test_r2_requires_live_role_check_and_source():
+    assert check("R2", _r2_good()) == []
+    no_live = {**_r2_good(), "tool_calls": [{"name": "search_knowledge", "args": {}}], "tool_results": []}
     assert len(check("R2", no_live)) >= 2
+
+
+def test_r2_rejects_other_users_foreign_roles_and_repair():
+    """冒烟 R2-2 的模式：查了 admin、查了不属于目标用户的角色、引用被修复——每一项都单独判失败"""
+    good = _r2_good()
+    other_user = {**good, "tool_calls": good["tool_calls"] + [{"name": "get_user_detail", "args": {"user_name": "admin"}}]}
+    assert any("其他用户" in f for f in check("R2", other_user))
+    foreign = {"name": "get_role_permissions", "payload": {"ok": True, "untrusted_data": {
+        "roleName": "普通角色", "perms": ["agent:chat:use"], "hasPerm": True}}}
+    assert any("不属于" in f for f in check("R2", {**good, "tool_results": good["tool_results"] + [foreign]}))
+    assert any("引用修复" in f for f in check("R2", {**good, "citationRepair": {"status": "failed"}}))
+    no_target = {**good, "tool_calls": [c for c in good["tool_calls"] if c["name"] != "get_user_detail"],
+                 "tool_results": [r for r in good["tool_results"] if r["name"] != "get_user_detail"]}
+    assert any("没有查询" in f for f in check("R2", no_target))
 
 
 def test_r3_no_answer_requires_not_found_and_no_sources():

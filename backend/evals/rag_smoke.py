@@ -90,9 +90,21 @@ def check(case_id: str, trace: dict) -> list[str]:
         if trace["invalidCitations"]:
             failures.append(f"无效引用 {trace['invalidCitations']} 处")
     elif case_id == "R2":
-        if not (_called(trace, "search_users") or _called(trace, "get_user_detail")):
-            failures.append("没有用业务工具查询用户")
+        # get_user_detail 必须查询 smoke_t01，且只能查它：查别的用户就可能把别人的结果说成目标用户的情况
+        detail_args = [c["args"].get("user_name") for c in trace["tool_calls"] if c["name"] == "get_user_detail"]
+        details = [p["untrusted_data"] for p in _results(trace, "get_user_detail") if p.get("ok")]
+        if TARGET not in detail_args or not any(d.get("userName") == TARGET for d in details):
+            failures.append(f"get_user_detail 没有查询 {TARGET}")
+        others = sorted({a for a in detail_args if a != TARGET} | {d.get("userName") for d in details if d.get("userName") != TARGET})
+        if others:
+            failures.append(f"get_user_detail 查询了其他用户：{others}")
+        target_roles = {r.get("roleName") for d in details if d.get("userName") == TARGET for r in d.get("roles", [])}
         roles = [p["untrusted_data"] for p in _results(trace, "get_role_permissions") if p.get("ok")]
+        foreign = sorted({r.get("roleName") for r in roles} - target_roles)
+        if foreign:
+            failures.append(f"查询了不属于 {TARGET} 的角色：{foreign}")
+        if trace.get("citationRepair") is not None:
+            failures.append("发生了引用修复（用过业务工具的回复不应修复）")
         target = [r for r in roles if r.get("roleName") == TARGET_ROLE]
         if not target:
             failures.append(f"没有用 get_role_permissions 查到 {TARGET_ROLE}")
@@ -325,7 +337,7 @@ def main(argv: list[str] | None = None) -> None:
                 verdict = "通过" if not trace["failures"] else "未通过：" + "；".join(trace["failures"])
                 print(f"{case['id']} 第{run}次 {verdict}  工具={[c['name'] for c in trace['tool_calls']]} "
                       f"来源={[s['chunkId'] for s in trace['sources']]} 无效引用={trace['invalidCitations']} "
-                      f"状态={trace['knowledgeStatus']} 引用修复={trace['citationRepair']} "
+                      f"状态={trace['knowledgeStatus']} 引用修复={(trace['citationRepair'] or {}).get('status')} "
                       f"步数={trace['model_calls']}（含修复 {trace['repair_calls']}） 耗时={trace['latency']}s "
                       f"Token={trace['input_tokens']}/{trace['output_tokens']}", flush=True)
 

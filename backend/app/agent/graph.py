@@ -7,9 +7,11 @@ StateGraph 定义：
                                            \\-(全部被拒绝)-------------------------> agent
     tools / propose 发现重复调用或连续无进展时，追加结束说明后直接 -> END（循环保护）
 
-cite：本轮检索到了知识片段、最终回复却没有合法引用时，服务端最多发起一次"引用修复"调用：
-不绑定工具，只给模型本轮合法分块和回复的句子，让它返回"第几句引用哪个分块"，由服务端把 [chunkId] 插进原文。
-回复正文不变、不新增工具调用、不碰审批和写操作；修复失败就保持 uncited，并在消息上记录失败。
+cite：纯知识问答（本轮只调用过 search_knowledge）检索到了知识片段、最终回复却没有合法引用时，
+服务端最多发起一次"引用修复"调用：不绑定工具，只给模型本轮合法分块和回复的句子，让它返回"第几句引用哪个分块"，
+由服务端把 [chunkId] 插进原文。回复正文不变、不新增工具调用、不碰审批和写操作。
+修复成功的状态是 auto_cited（自动关联，未核验），不是普通 cited；失败就保持 uncited。
+本轮调用过任何业务工具时不修复：回复里夹带实时数据，修复可能把知识库来源挂到错误的实时结论上（冒烟 R2 实际发生过）。
 
 节点里不持有 db / login_user：登录态和模型从 runtime.context 取（不落盘），数据库每次临时开 Session。
 """
@@ -170,9 +172,13 @@ REPAIR_PROMPT = """你只负责给一段已经写好的回复标注知识库引�
 - 只输出 JSON，不要输出其他文字：{"citations": [{"sentence": 句子编号, "chunkIds": ["片段的 chunkId"]}]}"""
 
 
-def _repair_record(status: str, response: AIMessage | None = None) -> dict:
-    """写进回复 additional_kwargs 的修复记录：状态、修复调用的模型 ID 和 Token（评估统计成本要用）"""
-    record = {"status": status}
+def _repair_record(status: str, original: str, response: AIMessage | None = None, repaired: str = "",
+                   mapping: list[dict] | None = None) -> dict:
+    """
+    写进回复 additional_kwargs 的修复记录：状态、修复前原文、修复后文本、句子与 chunkId 的映射、
+    修复调用的模型 ID 和 Token。原文保留下来，才能事后核对"哪些引用是自动补的、补在了哪句话上"
+    """
+    record = {"status": status, "original": original, "repaired": repaired, "mapping": mapping or []}
     if response is not None:
         usage = getattr(response, "usage_metadata", None) or {}
         record.update(model_name=(response.response_metadata or {}).get("model_name"),
@@ -202,12 +208,15 @@ def cite_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
     annotation = citations.annotate(messages).get(index)
     if not annotation or annotation["status"] != citations.STATUS_UNCITED:
         return {}
+    if citations.used_business_tools(messages, index):
+        # 确定性规则：本轮用过业务工具就不修复，检索片段继续作为 references 显示
+        return {}
 
     ctx = runtime.context
     turn = citations.turn_knowledge(messages, index)
     sentences = citations.split_sentences(last.content)
     if ctx.deadline and time.monotonic() + AGENT_MODEL_TIMEOUT_SECONDS > ctx.deadline:
-        return {"messages": [_with_repair(last, last.content, _repair_record(citations.REPAIR_FAILED))],
+        return {"messages": [_with_repair(last, last.content, _repair_record(citations.REPAIR_FAILED, last.content))],
                 "citation_repaired": True}
 
     payload = {"sentences": [{"sentence": i, "text": s} for i, s in enumerate(sentences, start=1)],
@@ -225,11 +234,12 @@ def cite_node(state: AgentState, runtime: Runtime[AgentContext]) -> dict:
     if isinstance(response, AIMessage) and not response.tool_calls and isinstance(response.content, str):
         mapping = citations.parse_repair(response.content, len(sentences), set(turn.valid))
     if not mapping:
-        return {"messages": [_with_repair(last, last.content, _repair_record(citations.REPAIR_FAILED, response))],
-                "citation_repaired": True}
+        record = _repair_record(citations.REPAIR_FAILED, last.content, response)
+        return {"messages": [_with_repair(last, last.content, record)], "citation_repaired": True}
     repaired = citations.insert_citations(last.content, mapping)
-    return {"messages": [_with_repair(last, repaired, _repair_record(citations.REPAIR_SUCCEEDED, response))],
-            "citation_repaired": True}
+    detail = [{"sentence": n, "text": sentences[n - 1], "chunkIds": ids} for n, ids in sorted(mapping.items())]
+    record = _repair_record(citations.REPAIR_SUCCEEDED, last.content, response, repaired, detail)
+    return {"messages": [_with_repair(last, repaired, record)], "citation_repaired": True}
 
 
 def _ended(state: AgentState) -> bool:

@@ -120,13 +120,28 @@ def _search_users(db: Session, login_user: dict, args: SearchUsersArgs) -> dict:
     return {"total": total, "rows": rows}
 
 
-class UserIdArgs(ToolArgs):
-    user_id: int = Field(ge=1, description="用户ID")
+class GetUserDetailArgs(ToolArgs):
+    """
+    只接受登录账号，不接受 user_id：真实冒烟中模型多次猜 user_id=1，查到的是 admin，再把结果当成目标用户回答。
+    extra="forbid" 保证提交 user_id 会被判为参数不合法，没有按 ID 查询的回退路径
+    """
+    user_name: str = Field(min_length=1, max_length=30,
+                           description="目标用户的登录账号（精确匹配）；只知道姓名或其他条件时先用 search_users 查询")
 
 
-def _get_user_detail(db: Session, login_user: dict, args: UserIdArgs) -> dict:
-    # get_user_detail 内部先做 check_user_data_scope，范围外用户直接抛"没有权限访问用户数据！"
-    detail = user_service.get_user_detail(db, login_user, args.user_id)
+# 不存在、范围外、匹配到多个账号都返回这一句：不回显参数，也不泄露范围外账号是否存在
+MSG_USER_UNAVAILABLE = "该用户不存在或不在你的数据范围内"
+
+
+def _get_user_detail(db: Session, login_user: dict, args: GetUserDetailArgs) -> dict:
+    users = user_service.find_users_by_name(db, args.user_name)
+    if len(users) != 1:
+        raise ServiceException(MSG_USER_UNAVAILABLE)
+    try:
+        # get_user_detail 内部先做 check_user_data_scope（按 system:user:query 计算数据范围）
+        detail = user_service.get_user_detail(db, login_user, users[0].user_id)
+    except ServiceException:
+        raise ServiceException(MSG_USER_UNAVAILABLE) from None
     role_names = {r["roleId"]: r["roleName"] for r in detail.get("roles", [])}
     roles = [{"roleId": rid, "roleName": role_names.get(rid, "")} for rid in detail.get("roleIds", [])]
     return {**detail["data"], "roles": roles}
@@ -295,8 +310,9 @@ _TOOL_LIST = [
              SearchUsersArgs, _search_users,
              ("userId", "userName", "nickName", "deptId", "dept.deptName", "status", "phonenumber", "email",
               "loginIp", "loginDate", "createTime"), _USER_MASKS, data_scoped=True),
-    ToolSpec("get_user_detail", "查询单个用户详情及其角色（受数据权限限制）", RISK_READ, "system:user:query",
-             UserIdArgs, _get_user_detail,
+    # 结果里的 userName 是服务端实际解析到的账号，模型据此确认查到的就是目标用户
+    ToolSpec("get_user_detail", "按登录账号（精确）查询单个用户详情及其角色（受数据权限限制）；只知道姓名等条件时先用 search_users",
+             RISK_READ, "system:user:query", GetUserDetailArgs, _get_user_detail,
              ("userId", "userName", "nickName", "deptId", "status", "phonenumber", "email", "sex",
               "loginIp", "loginDate", "createTime", "remark", "roles"), _USER_MASKS),
     ToolSpec("list_roles", "分页查询角色", RISK_READ, "system:role:list", ListRolesArgs, _list_roles,

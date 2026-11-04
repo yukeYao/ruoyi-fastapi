@@ -274,10 +274,14 @@ def _run_result(db: Session, graph, config: dict, conv_id: str, history_len: int
         "pendingAction": _pending_action_dict(db, snapshot),
         # 最终回复的来源：只来自本轮 search_knowledge 实际返回的分块，模型写的无效引用只计数
         "sources": reply_knowledge["sources"] if reply_knowledge else [],
+        # 引用修复自动关联的分块（状态 auto_cited）：未核验，前端与来源分开显示
+        "autoSources": reply_knowledge["autoSources"] if reply_knowledge else [],
         # 本轮检索到、但回复没有引用的分块：不是回答依据，前端与来源分开显示
         "references": reply_knowledge["references"] if reply_knowledge else [],
         "invalidCitations": reply_knowledge["invalidCitations"] if reply_knowledge else 0,
+        "suspiciousCitations": reply_knowledge["suspiciousCitations"] if reply_knowledge else 0,
         "knowledgeStatus": reply_knowledge["status"] if reply_knowledge else None,
+        # 修复信息（状态、原文、修复后文本、映射、模型 ID、Token），与历史消息里的 knowledge.citationRepair 相同
         "citationRepair": reply_knowledge["citationRepair"] if reply_knowledge else None,
     }
 

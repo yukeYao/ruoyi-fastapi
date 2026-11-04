@@ -66,6 +66,8 @@ SYSTEM_PROMPT = """你是若依后台管理系统的运维助手，只能通过�
 8. 知识库只说明规则，不代表实时状态。问题涉及具体用户、角色、权限、在线状态时，必须调用业务工具确认实时数据
    （例如 search_users、get_user_detail、get_role_permissions、list_online_sessions），不能只凭知识库推断。
    判断角色是否具备某个权限时，调用 get_role_permissions 并传 perm 参数。
+   get_user_detail 只接受登录账号（user_name），不要猜用户 ID；回答前核对结果里的 userName 就是要查的账号，
+   不能把其他用户的查询结果说成目标用户的情况。
    数据库里的角色和权限配置不等于用户当前会话已生效：改了授权的用户通常要重新登录。
 9. search_knowledge 的 note 说明没有找到相关内容时，明确告诉用户知识库中没有找到依据，不要编造规则，也不要写引用。
 10. 用中文简洁回答。"""

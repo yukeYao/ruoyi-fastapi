@@ -59,11 +59,28 @@
                     <span class="source-id">[{{ s.chunkId }}]</span>
                   </div>
                 </template>
+                <!-- 引用修复自动关联的分块：单独标注，不算普通来源 -->
+                <template v-else-if="item.knowledge.autoSources && item.knowledge.autoSources.length">
+                  <div class="sources-title">
+                    <el-tag size="small" type="warning">自动关联，未核验</el-tag>
+                    回答没有写引用，以下片段由系统自动关联到回答中的句子，未经核验
+                  </div>
+                  <div v-for="s in item.knowledge.autoSources" :key="s.chunkId" class="source-item">
+                    <span>{{ s.title }}</span><span v-if="s.section" class="source-section"> · {{ s.section }}</span>
+                    <span class="source-id">[{{ s.chunkId }}]</span>
+                  </div>
+                </template>
                 <el-tag v-else-if="KNOWLEDGE_STATUS[item.knowledge.status]" size="small" :type="KNOWLEDGE_STATUS[item.knowledge.status].type">
                   {{ KNOWLEDGE_STATUS[item.knowledge.status].label }}
                 </el-tag>
+                <div v-if="(item.knowledge.sources && item.knowledge.sources.length) || (item.knowledge.autoSources && item.knowledge.autoSources.length)" class="source-note">
+                  来源只表示内容来自本轮知识库检索，不代表回答已被验证为真
+                </div>
                 <div v-if="item.knowledge.invalidCitations" class="source-warning">
                   回复中有 {{ item.knowledge.invalidCitations }} 处引用不是本轮知识库检索返回的内容，无法核实，未列入来源
+                </div>
+                <div v-if="item.knowledge.suspiciousCitations" class="source-warning">
+                  存在无法核实的引用格式（{{ item.knowledge.suspiciousCitations }} 处），未列入来源
                 </div>
                 <!-- 检索到但回复没有引用的片段：与来源分开，明确不是回答依据 -->
                 <template v-if="item.knowledge.references && item.knowledge.references.length">
@@ -402,8 +419,11 @@ function createStreamHandler() {
       pushKnowledge(data.knowledgeStatus ? {
         status: data.knowledgeStatus,
         sources: data.sources,
+        autoSources: data.autoSources,
         references: data.references,
-        invalidCitations: data.invalidCitations
+        invalidCitations: data.invalidCitations,
+        suspiciousCitations: data.suspiciousCitations,
+        citationRepair: data.citationRepair
       } : null)
       applyResult(data)
     } else if (event === 'error') {
@@ -601,6 +621,10 @@ onMounted(() => {
     .source-warning {
       margin-top: 4px;
       color: var(--el-color-warning);
+    }
+    .source-note {
+      margin-top: 2px;
+      color: var(--el-text-color-placeholder);
     }
     .references-title {
       margin-top: 6px;
