@@ -1,0 +1,23 @@
+# 镜像只接收构建所需的源码，排除本地密钥、会话、索引和评估产物。
+**
+!backend/
+!backend/app/
+!backend/app/**
+!backend/main.py
+!backend/requirements.txt
+!backend/scripts/
+!backend/scripts/build_knowledge_index.py
+!docs/
+!docs/knowledge/
+!docs/knowledge/**
+!ruoyi-ui/
+!ruoyi-ui/**
+!deploy/
+!deploy/Caddyfile
+ruoyi-ui/node_modules
+ruoyi-ui/dist
+ruoyi-ui/.env*
+!ruoyi-ui/.env.production
+ruoyi-ui/.npmrc
+**/__pycache__
+**/*.pyc

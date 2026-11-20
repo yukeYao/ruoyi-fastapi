@@ -1,0 +1,130 @@
+name: ruoyi
+
+services:
+  web:
+    image: ruoyi-web:${RELEASE_TAG:-local}
+    build:
+      context: .
+      dockerfile: deploy/web.Dockerfile
+    environment:
+      SITE_ADDRESS: "${SITE_ADDRESS:-:80}"
+    ports:
+      - "${BIND_ADDRESS:-127.0.0.1}:${HTTP_PORT:-8088}:80"
+      - "${BIND_ADDRESS:-127.0.0.1}:${HTTPS_PORT:-8443}:443"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+  api:
+    image: ruoyi-api:${RELEASE_TAG:-local}
+    build:
+      context: .
+      dockerfile: deploy/api.Dockerfile
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_USER: ruoyi
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:?请在 .env 中设置 MYSQL_PASSWORD}"
+      MYSQL_DATABASE: ry-vue
+      REDIS_HOST: redis
+      JWT_SECRET: "${JWT_SECRET:?请在 .env 中设置 JWT_SECRET}"
+      AGENT_MODEL: "${AGENT_MODEL:-}"
+      AGENT_API_KEY: "${AGENT_API_KEY:-}"
+      AGENT_BASE_URL: "${AGENT_BASE_URL:-}"
+      AGENT_EMBEDDING_MODEL: "${AGENT_EMBEDDING_MODEL:-}"
+      AGENT_EMBEDDING_API_KEY: "${AGENT_EMBEDDING_API_KEY:-}"
+      AGENT_EMBEDDING_BASE_URL: "${AGENT_EMBEDDING_BASE_URL:-}"
+    volumes:
+      - api-data:/app/backend/data
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "from urllib.request import urlopen; urlopen('http://127.0.0.1:8080/openapi.json', timeout=2).close()"]
+      interval: 10s
+      timeout: 4s
+      retries: 8
+      start_period: 15s
+    restart: unless-stopped
+
+  mysql:
+    image: mysql:8.4
+    entrypoint:
+      - /bin/sh
+      - -ec
+      - |
+        # Windows 的文件挂载可能被 MySQL 判定为全局可写，先复制为 0644。
+        install -m 0644 /run/ruoyi-client.cnf /etc/mysql/conf.d/ruoyi-client.cnf
+        exec /usr/local/bin/docker-entrypoint.sh "$$@"
+      - ruoyi-mysql
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_general_ci"]
+    environment:
+      MYSQL_ROOT_PASSWORD: "${MYSQL_ROOT_PASSWORD:?请在 .env 中设置 MYSQL_ROOT_PASSWORD}"
+      MYSQL_DATABASE: ry-vue
+      MYSQL_USER: ruoyi
+      MYSQL_PASSWORD: "${MYSQL_PASSWORD:?请在 .env 中设置 MYSQL_PASSWORD}"
+    volumes:
+      - mysql-data:/var/lib/mysql
+      # 服务端字符集不会指定初始化 SQL 的客户端编码。
+      - type: bind
+        source: ./deploy/mysql-client.cnf
+        target: /run/ruoyi-client.cnf
+        read_only: true
+        bind:
+          create_host_path: false
+      # 官方镜像只在空数据目录初始化，并按文件名顺序导入。
+      - type: bind
+        source: ./backend/sql/ry_20260417.sql
+        target: /docker-entrypoint-initdb.d/01-ruoyi.sql
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./backend/sql/agent.sql
+        target: /docker-entrypoint-initdb.d/02-agent.sql
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ./backend/sql/knowledge.sql
+        target: /docker-entrypoint-initdb.d/03-knowledge.sql
+        read_only: true
+        bind:
+          create_host_path: false
+    healthcheck:
+      # 初始化用的临时 MySQL 禁用 TCP。等正式进程启动，并用应用账号确认已建表。
+      test:
+        - CMD-SHELL
+        - >-
+          MYSQL_PWD="$${MYSQL_PASSWORD}" mysql --protocol=TCP -h 127.0.0.1
+          -u "$${MYSQL_USER}" "$${MYSQL_DATABASE}"
+          -e 'SELECT 1 FROM sys_user LIMIT 1; SELECT 1 FROM agent_conversation LIMIT 1; SELECT 1 FROM agent_knowledge_index LIMIT 1'
+      interval: 5s
+      timeout: 4s
+      retries: 24
+      start_period: 30s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  caddy-data:
+  caddy-config:
+  api-data:
+  mysql-data:
+  redis-data:
