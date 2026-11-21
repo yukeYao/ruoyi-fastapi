@@ -1,6 +1,6 @@
 # 若依 FastAPI 单机部署
 
-在仓库根目录执行以下 Compose 命令。部署文件基于合入智能助手和知识库的 `master` 提交 `0bb9034`，需要该提交或包含它的版本。
+在仓库根目录执行以下 Compose 命令。发布时检出并记录完整 Git 提交 SHA。
 
 ## 本地启动与验收
 
@@ -50,3 +50,27 @@ docker compose exec api python scripts/build_knowledge_index.py
 ```
 
 构建使用镜像中的 `docs/knowledge`，SQLite 会话和 FAISS 索引保存在 `api-data` 卷。用演示账号测试一条带来源的知识问答，再测试一次需要人工审批的操作。构建时文档和检索时的提问会发往配置的 Embedding 服务，演示使用合成数据。
+
+### 使用自托管 Embedding
+
+在 `.env` 中填入单独生成的 `AGENT_EMBEDDING_API_KEY`。以下命令显式加载可选的 Compose 配置。API 通过容器内网访问 TEI，模型缓存保存在 `embedding-model` 卷。首次启动需要下载固定版本的 `BAAI/bge-small-zh-v1.5`。
+
+```sh
+docker compose -f compose.yaml -f compose.embedding.yaml config --quiet
+docker compose -f compose.yaml -f compose.embedding.yaml up -d --wait
+docker compose -f compose.yaml -f compose.embedding.yaml logs --tail=50 embedding
+```
+
+待 Embedding 加载模型后构建索引。
+
+```sh
+docker compose -f compose.yaml -f compose.embedding.yaml exec api python scripts/build_knowledge_index.py
+```
+
+配置自托管服务后，更新、回滚和排查也要带上同一组 `-f` 参数。已有实例应沿用当前 Compose 项目名，例如通过 `-p` 或 `COMPOSE_PROJECT_NAME` 指定，以继续使用现有数据卷。更换 Embedding 模型后需重建索引并重新校准检索门槛。
+
+### 发布记录与恢复验证
+
+每次发布记录完整 Git SHA、Compose 项目名、配置组合和 Web/API 镜像摘要。可使用 `docker image inspect --format '{{.Id}} {{json .RepoDigests}}' 镜像:标签` 核对镜像。发布前保留上一版镜像和应用数据备份。
+
+MySQL 使用一致性逻辑备份。SQLite 会话使用 SQLite 在线备份，并保存对应的 FAISS 索引及清单。恢复演练在临时数据库和隔离目录进行，核对业务表、SQLite 完整性以及索引的向量数量和维度。将备份放在权限受限的位置。

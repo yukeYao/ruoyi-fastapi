@@ -1,0 +1,30 @@
+# 仅在需要自托管 Embedding 时与 compose.yaml 一起加载。
+services:
+  api:
+    environment:
+      AGENT_EMBEDDING_MODEL: BAAI/bge-small-zh-v1.5
+      AGENT_EMBEDDING_BASE_URL: http://embedding/v1
+      AGENT_EMBEDDING_API_KEY: "${AGENT_EMBEDDING_API_KEY:?请设置自托管 Embedding 的共享密钥}"
+  embedding:
+    image: ghcr.io/huggingface/text-embeddings-inference@sha256:2538ea1c9640d3763b15af668039d24172d063b42337b0c27796fc2be180c78d
+    command:
+      - --model-id
+      - BAAI/bge-small-zh-v1.5
+      - --revision
+      - 7999e1d3359715c523056ef9478215996d62a620
+      - --port
+      - "80"
+      - --max-batch-tokens
+      - "2048"
+      - --max-client-batch-size
+      - "32"
+    environment:
+      API_KEY: "${AGENT_EMBEDDING_API_KEY:?请设置自托管 Embedding 的共享密钥}"
+    cpus: 1.0
+    mem_limit: 768m
+    restart: unless-stopped
+    volumes:
+      - embedding-model:/data
+
+volumes:
+  embedding-model:
